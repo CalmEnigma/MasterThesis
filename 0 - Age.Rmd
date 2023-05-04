@@ -1,0 +1,37 @@
+---
+title: "Age"
+author: "Albert Planting-Gyllenbaga (41669)"
+date: "17/03/2021"
+output: html_document
+---
+```{r}
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(stringr)
+library(ggplot2)
+library(directlabels)
+library(purrr)
+library(fBasics)
+```
+
+
+```{r}
+# Clear data
+rm(list=ls())
+
+# Load data
+df = read.delim2("CRSP_age.csv", sep = ",")
+
+# Explode dates
+df$year = as.numeric(substr(df$date, start = 1, stop = 4))
+
+# First year in Cstat
+age = df %>% group_by(PERMCO) %>% summarise(age = min(year))
+
+# Variable name
+#age = rename(age, GVKEY = gvkey)
+
+# Export
+write.csv(age, "CRSP_age.csv", row.names = F)
+```

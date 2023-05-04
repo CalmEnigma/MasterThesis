@@ -1,0 +1,345 @@
+---
+title: "Firm Dataframe"
+author: "Albert Planting-Gyllenbaga (41669)"
+date: "16/03/2021"
+output: html_document
+---
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(stringr)
+library(ggplot2)
+library(directlabels)
+library(purrr)
+library(fBasics)
+library(Hmisc)
+library(DescTools)
+detach("package:plm", unload=TRUE)
+```
+
+
+```{r}
+# Clear data
+rm(list=ls())
+
+# Load data
+df = read.delim2("firm_df.csv", sep = ",")
+hhi = read.delim2("ind_HHI.csv", sep = ",")
+hhi2 = read.delim2("ind_HHI2.csv", sep = ",")
+msh = read.delim2("ind_rev.csv", sep = ",")
+cpi = read.delim2("CPI.csv", sep = ",")
+age = read.delim2("CRSP_age.csv", sep = ",")
+to = read.delim2("Turnover.csv", sep = ",")
+naics = read.delim2("NAICS.csv", sep = ",")
+
+# Add in inflation data
+cpi = drop_na(cpi, year)
+df = left_join(df, cpi[c("year", "CPIadj")], by = "year")
+
+# Add in age data
+df = left_join(df, age, by = "PERMCO")
+df$age = df$year - df$age
+
+# Add in turnover data
+df = left_join(df, to[c("year", "PERMCO", "to")], by = c("year", "PERMCO"))
+
+# Add industry revenue data
+df = left_join(df, msh, by = c("year", "sic3"))
+```
+
+
+Adjust variables
+```{r}
+# Adjust classes
+x = c("ajex", "ceq", "csho", "dlc", "ebit", "ebitda", "lct", "lt", "ni", "revt",
+      "xrd", "adjex_c", "dvpsx_f", "mkvalt", "prcc_f", "CPIadj", "to", "intan",
+      "at", "capx", "indrev", "NEST")
+
+for (i in x) {
+  df[[i]] = as.numeric(as.character(df[[i]]))
+}
+
+# Adjust variables for inflation
+df$ceq = df$ceq/df$CPIadj
+#df$ebit = df$ebit/df$CPIadj
+#df$ebitda = df$ebitda/df$CPIadj
+df$dlc = df$dlc/df$CPIadj
+df$lct = df$lct/df$CPIadj
+df$lt = df$lt/df$CPIadj
+#df$ni = df$ni/df$CPIadj
+#df$revt = df$revt/df$CPIadj
+df$xrd = df$xrd/df$CPIadj
+#df$dvpsx_f = df$dvpsx_f/df$CPIadj
+#df$prcc_f = df$prcc_f/df$CPIadj
+df$intan = df$intan/df$CPIadj
+df$at = df$at/df$CPIadj
+df$capx = df$capx/df$CPIadj
+
+# Create prices and dps, adjusted for dividends and stock splits
+df$ajex = ifelse(df$ajex == 0, NA, df$ajex)
+df$prc = df$prcc_f/df$ajex
+df$div = df$dvpsx_f/df$ajex
+df$prc = ifelse(df$prc == 0, NA, df$prc)
+```
+
+
+Create new firm-level variables
+```{r}
+# Create market cap
+df$mcap = df$prcc_f * df$csho
+df$mcap = ifelse(df$mcap == 0, NA, df$mcap)
+df$S = df$mcap/df$CPIadj
+
+# Create year-end/start market cap of ipos and delists
+df$ipo_mcap = df$ipo * df$mcap
+df = df %>%
+    group_by(PERMCO) %>%
+    arrange(year) %>%
+    mutate(delist_mcap = Lag(mcap, shift = 1) * delist)
+
+# Remove observations that may cause infinites
+df$mcap = ifelse(df$mcap == 0, NA, df$mcap)
+df$ceq = ifelse(df$ceq == 0, NA, df$ceq)
+df$at = ifelse(df$at == 0, NA, df$at)
+df$indrev = ifelse(df$indrev == 0, NA, df$indrev)
+
+# Create firm-level lags
+df = df %>%
+    group_by(GVKEY) %>%
+    arrange(year) %>%
+    mutate(prc0 = Lag(prc, shift = 1),
+           prc1 = lead(prc, default = NA),
+           prc2 = lead(prc, 2, default = NA),
+           prc3 = lead(prc, 3, default = NA),
+           prc4 = lead(prc, 4, default = NA),
+
+           div1 = lead(div, default = NA),
+           div2 = lead(div, 2, default = NA),
+           div3 = lead(div, 3, default = NA),
+           div4 = lead(div, 4, default = NA),
+           
+           ebit0 = Lag(ebit, shift = 1),
+           ebit1 = lead(ebit, default = NA),
+           ebit2 = lead(ebit, 2, default = NA),
+           ebit3 = lead(ebit, 3, default = NA),
+           
+           ebitda0 = Lag(ebitda, shift = 1),
+           ebitda1 = lead(ebitda, default = NA),
+           ebitda2 = lead(ebitda, 2, default = NA),
+           ebitda3 = lead(ebitda, 3, default = NA),
+           ebitda4 = lead(ebitda, 4, default = NA),
+           
+           mcap0 = Lag(mcap, shift = 1),
+           mcap1 = lead(mcap, default = NA),
+           mcap2 = lead(mcap, 2, default = NA)
+           )
+
+# Create other measures for Durnev informativeness calc
+df$r0 = (df$prc + df$div)/df$prc0 -1 # Current price chg - continously compounded
+df$r1 = (df$prc1 + df$div1)/df$prc - 1 # full holding period return from t to t+1
+df$r2 = (df$prc2 + df$div2)/df$prc1 - 1 # t +2 
+df$r3 = (df$prc3 + df$div3)/df$prc2 - 1 # t +3
+
+df$chg_ebit0 = (df$ebit-df$ebit0)/df$mcap0
+df$chg_ebit1 = (df$ebit1-df$ebit0)/df$mcap0
+df$chg_ebit2 = (df$ebit2-df$ebit0)/df$mcap0
+df$chg_ebit3 = (df$ebit3-df$ebit0)/df$mcap0
+
+df$chg_ebitda0 = (df$ebitda-df$ebitda0)/df$mcap0
+df$chg_ebitda1 = (df$ebitda1-df$ebitda0)/df$mcap0
+df$chg_ebitda2 = (df$ebitda2-df$ebitda0)/df$mcap0
+df$chg_ebitda3 = (df$ebitda3-df$ebitda0)/df$mcap0
+
+# Create Lundholm and Myers aggregated changes in earnings and returns
+df$EBIT_l = df$ebit0/df$mcap0
+df$EBIT_t = df$ebit/df$mcap0
+df$EBIT3 = (df$ebit1 + df$ebit2 + df$ebit3)/df$mcap0
+df$EBITDA_l = df$ebitda0/df$mcap0  
+df$EBITDA_t = df$ebitda/df$mcap0
+df$EBITDA3 = (df$ebitda1 + df$ebitda2 + df$ebitda3)/df$mcap0
+df$EBITDA4 = (df$ebitda1 + df$ebitda2 + df$ebitda3 + df$ebitda4)/df$mcap0
+df$R3 = (df$prc3 + df$div1 + df$div2 + df$div3)/df$prc -1
+df$R4 = (df$prc4 + df$div1 + df$div2 + df$div3 + df$div4)/df$prc -1
+
+# Market-to-book
+df$MB = df$mcap / df$ceq
+
+# Earnings-to-price
+df$EP = df$ni/df$mcap
+df$EP = ifelse(df$EP <0, 0, df$EP)
+
+# EV/EBITDA
+df$EVE = (df$mcap + df$lt - df$lct + df$dlc)/df$ebitda
+df$EVE = ifelse(df$EVE <0, 0, df$EVE)
+
+# Intangibles over total assets
+df$prc_int = df$intan / df$at
+
+# Capex/Total assets
+df$prc_capx = df$capx / df$at
+
+# R&D/Total assets
+df$prc_xrd = df$xrd / df$at
+
+# Market share
+# df$MS = df$revt/df$indrev
+
+# Loss indicator
+df$L = ifelse(df$ebitda<0, 1, 0)
+
+#basicStats(df$L)
+
+# Potential additions
+# Size: Sales
+# IPO/Delist size: Assets
+```
+
+
+Select dataset features
+```{r}
+df1 = df %>% select(year, PERMCO, GVKEY, COMNAM, sic4, sic3, sic2, sic1,
+                    listed, delist, ipo,
+                    r0, r1, r2, r3,
+                    chg_ebit0, chg_ebit1, chg_ebit2, chg_ebit3,
+                    chg_ebitda0, chg_ebitda1, chg_ebitda2, chg_ebitda3,
+                    EBIT_l, EBIT_t, EBIT3, EBITDA_l, EBITDA_t, EBITDA3, R3,
+                    at, S, mcap, to, prc_xrd, prc_int, MB, EVE, EP, age, L,
+                    ipo_mcap, delist_mcap, fyr, NEST, EBITDA4, R4
+                    )
+```
+
+
+Winsorise outliers for FERC and change Infs to NAs
+```{r}
+# Change infs to NAs
+df1$EVE[is.infinite(df1$EVE)] = NA
+df1$EP[is.infinite(df1$EP)] = NA
+
+# Variables to winsorise
+winsor  = c("r0", "r1", "r2", "r3",
+          "chg_ebit0", "chg_ebit1", "chg_ebit2", "chg_ebit3",
+          "chg_ebitda0", "chg_ebitda1", "chg_ebitda2", "chg_ebitda3",
+          "EBIT_l", "EBIT_t", "EBIT3", "EBITDA_l", "EBITDA_t", "EBITDA3", "R3",
+          "MB", "EVE", "EP", "EBITDA4", "R4")
+
+# Winsorise to the 1st and 99th percentile
+wins = function(x, pct_level = 0.01){
+  Winsorize(x, probs = c(pct_level, 1-pct_level), na.rm = T)
+}
+
+df1[winsor] = lapply(df1[winsor], wins)
+```
+
+
+Add Industry-level data
+```{r}
+# Merge in Div and HHI
+df1 = left_join(df1, hhi, by = c("year", "sic3"))
+df1 = left_join(df1, hhi2, by = c("year", "sic2"))
+#df1 = left_join(df1, div, by = c("year", "sic3"))
+
+# Adjust classes
+df1$hhi = as.numeric(as.character(df1$hhi))
+df1$hhi2 = as.numeric(as.character(df1$hhi2))
+#df1$div = as.numeric(as.character(df1$div))
+
+# Create total listings
+tlist3 = df1 %>% group_by(year, sic3) %>% summarise(tlist3 = sum(listed),
+                                                   nIPO3 = sum(ipo),
+                                                   nDel3 = sum(delist))
+
+tlist4 = df1 %>% group_by(year, sic4) %>% summarise(tlist4 = sum(listed),
+                                                   nIPO4 = sum(ipo),
+                                                   nDel4 = sum(delist))
+
+df1 = left_join(df1, tlist3, by = c("year", "sic3"))
+df1 = left_join(df1, tlist4, by = c("year", "sic4"))
+
+# Add 3-digit listing count lag
+df1 = df1 %>%
+    group_by(GVKEY) %>%
+    arrange(year) %>%
+    mutate(tlist3l = Lag(tlist3, shift = 1))
+
+# Check
+glimpse(df1)
+```
+
+
+NAICS listing counts
+```{r}
+# Create month and year
+naics$year = as.numeric(substr(naics$date, start = 1, stop = 4))
+naics$month = as.numeric(substr(naics$date, start = 5, stop = 6))
+
+# Drop non-year ends
+naics = subset(naics, month == 12)
+
+# Create relevant digit classes
+naics$naics4 = as.numeric(substr(naics$NAICS, start = 1, stop = 4))
+naics = naics[c("year", "PERMCO", "naics4")]
+
+# Remove NAs and duplicates
+naics = drop_na(naics)
+naics = naics[!duplicated(naics),]
+
+# Merge into df
+df1 = left_join(df1, naics, by = c("year", "PERMCO"))
+
+# Create NAICS listing counts
+lc_naics = df1 %>% group_by(year, naics4) %>% summarise(lc_naics = sum(listed))
+lc_naics = drop_na(lc_naics)
+df1 = left_join(df1, lc_naics, by = c("year", "naics4"))
+```
+
+Export dataset
+```{r}
+write.csv(df1, "dataset_firms.csv", row.names = F)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Scrapbox
+```{r}
+x = subset(df, sic3 == 508 & year == 1999)
+#x = subset(x, GVKEY != 8484)
+mod = lm(r0 ~ chg_ebit0 + chg_ebit1 + chg_ebit2 + chg_ebit3 + r1 + r2 + r3,
+   data = x, na.action = na.omit)
+n = length(summary(mod)$residuals)
+ferc = sum(mod$coefficients[3:5])
+rsq_a = summary(mod)$r.squared
+mod = lm(r0 ~ chg_ebit0, data = x, na.action = na.omit)
+rsq_b = summary(mod)$r.squared
+finc = rsq_a - rsq_b
+
+y = x %>% select(r0, chg_ebit0, chg_ebit1, chg_ebit2, chg_ebit3,
+                 r1, r2, r3, prc0, prc)
+
+z = subset(df, GVKEY == 1951) %>% select(year, GVKEY, prc, ajex, COMNAM, sic3)
+z = subset(df, grepl("SAVARA", df$COMNAM)) %>% select(year, GVKEY, prc, ajex, COMNAM, sic3)
+
+summary(mod)
+mod$coefficients["chg_ebit1"] + mod$coefficients["chg_ebit2"]
+sum(mod$coefficients[3:4])
+
+dfi$prc_ipo = dfi$ipo/dfi$tlist
+basicStats(dfi$prc_ipo)
+dfi = subset(dfi, prc_ipo > 0 & prc_ipo< 1)
+cor(dfi$tlist, dfi$prc_ipo)
+```

@@ -1,0 +1,346 @@
+---
+title: "CRSP"
+author: "Albert Planting-Gyllenbaga (41669)"
+date: "12/03/2021"
+output: html_document
+---
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(stringr)
+library(ggplot2)
+library(directlabels)
+library(purrr)
+library(scales)
+library(Hmisc)
+```
+
+
+```{r}
+# Clear data
+rm(list=ls())
+
+# Load data
+df = read.delim2("CRSP1.csv", sep = ",")
+```
+
+
+Fix variables
+```{r}
+# Fix price observations
+df$PRC = as.character(df$PRC)
+df$PRC = str_remove_all(df$PRC, "-")
+df$PRC = as.numeric(df$PRC)
+
+# Make a security's delist code show during all time periods
+dlstcd = subset(df, !is.na(DLSTCD))
+dlstcd = dlstcd[c("PERMNO", "DLSTCD")]
+df = left_join(select(df, -DLSTCD), dlstcd, by = "PERMNO")
+```
+
+Add variables
+```{r}
+# Explode dates
+df$year = as.numeric(substr(df$date, start = 1, stop = 4))
+df$month = as.numeric(substr(df$date, start = 5, stop = 6))
+
+# Keep only year-end observations
+df = subset(df, month == 12)
+
+# Break down SIC codes
+df$sic4 = df$SICCD
+df$sic3 = substr(df$sic4, start = 1, stop = 3)
+df$sic2 = substr(df$sic4, start = 1, stop = 2)
+df$sic1 = substr(df$sic4, start = 1, stop = 1)
+```
+
+Exclusions 1: For total listings comparable to Doidge
+```{r}
+# Select exchanges
+df = subset(df, EXCHCD %in% c(1,2,3)) # US exchanges
+
+# Remove unwanted types of shares
+df = subset(df, SHRCD %in% c(10, 11)) # only common stocks incorporated in the US
+
+# Choose class A shares, B shares, or shares with no class
+df = subset(df, SHRCLS %in% c("A", "B", ""))
+
+# Find remaining instances where a company has multiple share classes
+df$pcoy = paste(df$PERMCO, df$year)
+df$pcoycl = paste(df$PERMCO, df$year, df$CUSIP, df$SHRCLS)
+x = unique(df[duplicated(df$pcoy),]$PERMCO)
+x = subset(df, PERMCO %in% x)
+
+# Determine which of the multiple observations has the highest share volume
+maxvol = x %>% group_by(pcoy) %>% summarise(maxvol = max(VOL)) %>% ungroup()
+x = left_join(maxvol, x, by = "pcoy")
+x$select = ifelse(x$maxvol == x$VOL, 1, 0)
+x = subset(x, select ==0)
+x = x$pcoycl
+
+# Drop share classes that don't have the max volume
+df = subset(df, !(pcoycl %in% x))
+
+# Drop remaining duplicate firm-years
+df = df[!(duplicated(df$pcoy)),]
+
+# Save a version of the dataset without my study-specific exclusions
+df1 = df
+```
+
+
+Identify new lists and delists
+```{r}
+# Reset to general df
+#df = df1
+
+# Drop observations with missing SIC
+df = subset(df, !(SICCD %in% c("0", "Z")))
+
+# Create df with all firms across all years
+period = min(df$year) : max(df$year)
+allco = unique(df$PERMCO)
+
+df2 = crossing(year = period, PERMCO= allco)
+df2 = left_join(df2, df, by = c("year", "PERMCO"))
+
+# Identify if a firm is listed that year or not
+df2$listed = ifelse(is.na(df2$PERMNO), 0, 1)
+
+# Identify if a firm has listed or delisted this year
+df2 = df2 %>%
+    group_by(PERMCO) %>%
+    arrange(year) %>%
+    mutate(chlist = listed - Lag(listed, shift =1),
+           sicp = Lag(sic4, shift =1))
+df2$chlist = replace_na(df2$chlist, 0)
+
+# Identify if it's a list or delist
+df2$delist = ifelse(df2$chlist ==-1, 1, 0)
+df2$ipo = ifelse(df2$chlist ==1, 1, 0)
+
+# Give a SIC code to delists
+df2$sic4[is.na(df2$sic4)] = df2$sicp[is.na(df2$sic4)]
+df2$sic3 = substr(df2$sic4, start = 1, stop = 3)
+df2$sic2 = substr(df2$sic4, start = 1, stop = 2)
+df2$sic1 = substr(df2$sic4, start = 1, stop = 1)
+```
+
+Export dfs
+```{r}
+# Extract list of permcos
+write.table(unique(df2$PERMCO), "CRSP_IDs.txt", quote = F, row.names = F, col.names = F)
+
+# Extract list of permnos
+write.table(unique(df2$PERMNO), "CRSP_PERMNOs.txt", quote = F, row.names = F, col.names = F)
+
+# Extract final CRSP dataframe
+write.csv(df2, "CRSP2.csv", row.names = F)
+```
+
+
+
+################################################################################################
+
+
+
+
+
+
+
+
+
+
+
+
+
+Total counts and plots
+```{r}
+# Total listings, ipos and delists
+x = df2 %>% group_by(year) %>% summarise(lists = sum(listed),
+                                         ipos = sum(ipo),
+                                         delists = sum(delist))
+
+# Check that listings and changes in lists add up
+x$test = x$lists - x$ipos + x$delists
+x$netlist = x$ipos - x$delists
+
+
+# Plot listings
+scale = 3
+windowsFonts(Times=windowsFont("Times New Roman"))
+p = ggplot(x) +
+  geom_line(aes(x=year, y=lists)) + 
+  scale_y_continuous("Number of listings", breaks = seq(0, 8000, by = 500),
+                     labels = comma) +
+  scale_x_continuous(breaks = min(x$year):max(x$year), expand = c(0,1)) +
+  theme(axis.line = element_line(colour = "black"),
+        panel.background = element_blank(),
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+        axis.title.x=element_blank(),
+        text=element_text(family="Times"))
+p
+ggsave("Images\\Tot_Listings_full.png", p, width = 16.5, height = 7, units = "cm")
+
+# Turn into ggplot-compatible
+
+#x1 = x
+#x = pivot_longer(data=x, cols=c("ipos", "delists"),
+            # names_to = "chg", values_to = "n")
+
+# Plot listings (multiple axes)
+ # geom_bar(aes(x= year, y=netlist,), stat = "identity",
+       #    fill = "white", color = "black") +
+
+#scale = 5
+#ggplot(x) +
+  #geom_line(aes(x=year, y=lists)) +
+  #geom_bar(aes(x= year, y=n*scale, fill = chg), stat = "identity", position = "dodge"
+           #, color = "black") +
+  #scale_y_continuous(sec.axis = sec_axis(~./scale))
+```
+
+
+Industry listings
+```{r}
+# Net lists by industry
+x = df2 %>% group_by(year, sic3) %>% summarise(lists = sum(listed),
+                                               ipos = sum(ipo),
+                                               delists = sum(delist))
+
+y = subset(x, year >=1997)
+y = y %>% group_by(sic3) %>% summarise(ipos = sum(ipos),
+                                       delists = sum(delists))
+y$chg = y$ipos - y$delists
+
+# Change in listings
+y = drop_na(y)
+y = subset(y, sic3 != 999)
+y = y %>% mutate(bkt = ifelse(chg > 10, "11+",
+                              ifelse(chg >0 & chg<=10, "+1 to +10",
+                                     ifelse(chg == 0, "No change",
+                                     ifelse(chg <0 & chg >= -10, "-1 to -10",
+                                            ifelse(chg< -10 & chg >= -20, "-11 to -20",
+                                                   ifelse(chg< -20 & chg>= -30, "-21 to -30",
+                                                          ifelse(chg< -30 & chg>= -40, "-31 to -40",
+                                                                 ifelse(chg< -40 & chg>= -50, "-41 to -50", "-50+")))))))))
+y$dir = ifelse(y$chg > 0, "plus",
+               ifelse(y$chg <0, "minus", "nochange"))
+
+
+# Create histogram
+y$bkt = factor(y$bkt)
+y$bkt <- ordered(y$bkt,
+                 levels = c("-50+", "-41 to -50", "-31 to -40", "-21 to -30", "-11 to -20",
+                            "-1 to -10", "No change", "+1 to +10", "11+"))
+
+windowsFonts(Times=windowsFont("Times New Roman"))
+p = ggplot(data=y, aes(x=bkt, fill = dir)) +
+  geom_histogram(binwidth=10, stat = "count") +
+  scale_fill_manual(values = c("salmon", "lightblue", "lightgreen")) +
+  scale_x_discrete(expand = c(0.08,0)) +
+  scale_y_continuous(limits = c(0,260), expand = c(0,0)) +
+  theme(legend.position = "none",
+        axis.line = element_line(colour = "black"),
+        #panel.background = element_blank(),
+        text=element_text(family="Times")) +
+  ylab("Number of 3-digit SIC industries") +
+  xlab("Net new listings from 1997 to 2020")
+
+p
+ggsave("Images\\Ind_netlist.png", p, width = 16.5, height = 7, units = "cm")
+```
+
+
+
+
+
+
+Industry net lists
+```{r}
+# Total listings
+x = df2 %>% group_by(year, sic3) %>% summarise(lists = sum(listed))
+
+l1 = subset(x, year ==1997)
+l2 = subset(x, year ==2020)
+
+# Change in listings
+l = left_join(l1[-1], l2[-1], by = c("sic3"))
+colnames(l) = c("sic3", "lists97", "lists20")
+l$lists20 = replace_na(l$lists20, 0)
+l = drop_na(l)
+l = subset(l, sic3 != 999)
+l$chg = l$lists20 - l$lists97
+l = l %>% mutate(bkt = ifelse(chg > 10, "11+",
+                              ifelse(chg >0 & chg<=10, "+1 to +10",
+                                     ifelse(chg == 0, "No change",
+                                     ifelse(chg <0 & chg >= -10, "-1 to -10",
+                                            ifelse(chg< -10 & chg >= -20, "-11 to -20",
+                                                   ifelse(chg< -20 & chg>= -30, "-21 to -30",
+                                                          ifelse(chg< -30 & chg>= -40, "-31 to -40",
+                                                                 ifelse(chg< -40 & chg>= -50, "-41 to -50", "-50+")))))))))
+l$dir = ifelse(l$chg > 0, "plus",
+               ifelse(l$chg <0, "minus", "nochange"))
+
+# Create histogram
+l$bkt = factor(l$bkt)
+l$bkt <- ordered(l$bkt,
+                 levels = c("-50+", "-41 to -50", "-31 to -40", "-21 to -30", "-11 to -20",
+                            "-1 to -10", "No change", "+1 to +10", "11+"))
+
+windowsFonts(Times=windowsFont("Times New Roman"))
+p = ggplot(data=l, aes(x=bkt, fill = dir)) +
+  geom_histogram(binwidth=10, stat = "count") +
+  scale_fill_manual(values = c("salmon", "lightblue", "lightgreen")) +
+  scale_x_discrete(expand = c(0.08,0)) +
+  scale_y_continuous(limits = c(0,260), expand = c(0,0)) +
+  theme(legend.position = "none",
+        axis.line = element_line(colour = "black"),
+        #panel.background = element_blank(),
+        text=element_text(family="Times")) +
+  ylab("Number of 3-digit SIC industries") +
+  xlab("Absolute change in the industry's number of listed firms from 1997 to 2020")
+
+p
+ggsave("Images\\Indlist_chg.png", p, width = 16.5, height = 7, units = "cm")
+```
+
+################################################################################################
+
+
+
+Potential problems
+```{r}
+# Company delists and relists, but online stock never shows a pause
+# Solution: online stock price was of another company with a similar name
+x = subset(df2, PERMCO == 8442)
+
+
+# The year start listed companies + new lists + delists don't add up
+y = subset(df2, year %in% c(2010,2011))
+y$id = paste(y$PERMCO, y$PERMNO)
+
+w = df[duplicated(df$pnoyr),]$PERMCO
+w = subset(y, PERMCO %in% w)
+sum(w$delist)
+
+z = subset(df2, PERMCO == 1908) # different share (A and no class) classes = abnormally high list counts
+z = subset(df2, PERMCO == 16512)
+
+df$pnoyr = paste(df$PERMCO, df$year)
+
+```
+
+
+Scrap
+```{r}
+# Create year that a new security is listed
+#ipodat = df %>% group_by(PERMNO) %>% summarise(ipodat = min(year)) %>% ungroup()
+#df = left_join(df, ipodat, by = "PERMNO")
+
+# Create year of a security's delist
+#deldat = df %>% group_by(PERMNO) %>% summarise(deldat = max(year)+1) %>% ungroup()
+#df = left_join(df, deldat, by = "PERMNO")
+```

@@ -1,0 +1,1276 @@
+---
+title: "Model 3"
+author: "Albert Planting-Gyllenbaga (41669)"
+date: "19/03/2021"
+output: html_document
+---
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(stringr)
+library(ggplot2)
+library(directlabels)
+library(purrr)
+library(fBasics)
+library(Hmisc)
+library(plm)
+library(stargazer)
+library(lmtest)
+library(sandwich)
+library(car)
+library(scales)
+library(DescTools)
+library(ggrepel)
+library(lfe)
+library(strucchange)
+```
+
+
+```{r}
+# Clear data
+rm(list=ls())
+
+# Load data
+df = read.delim2("dataset_firms.csv", sep = ",")
+```
+
+Data cleaning 1
+```{r}
+# Adjust classes
+x = colnames(df)
+x = x[!(x %in% c("COMNAM"))]
+
+for (i in x) {
+  df[[i]] = as.numeric(as.character(df[[i]]))
+}
+
+x = c("year", "PERMCO", "GVKEY", "COMNAM", "sic4", "sic3", "sic2", "sic1", "naics4")
+
+for (i in x) {
+  df[[i]] = factor(df[[i]])
+}
+
+
+# Drop NAs from dependent variable
+df = drop_na(df, r0)
+
+# Drop obs with negative MB value, take log and winsorize
+df = subset(df, MB >0)
+#df$MB = log(df$MB)
+#df$MB = Winsorize(df$MB, probs = c(0.01, 1))
+
+# Take log of turnover
+df = subset(df, to >0)
+df$to = Winsorize(df$to, probs = c(0, 0.99))
+df$to = log(df$to)
+
+# Take log of age
+df = subset(df, age >=0)
+#df$age = log(df$age+1)
+
+# Create some industry variables
+df = df %>% group_by(year, sic3) %>% mutate(indMB = mean(MB, na.rm = T),
+                                            indto = mean(to, na.rm = T),
+                                            indage = mean(age, na.rm = T))
+```
+
+
+Main exclusions
+```{r}
+# Drop finance and unclassified industries
+df = subset(df, sic1 != "6")
+df = subset(df, sic2 != "99")
+
+# Select required variables
+df = df %>% select(year, PERMCO, GVKEY, sic4, sic3, sic2, sic1,
+                   r0, tlist3, tlist4, tlist3l,
+                   EBIT_l, EBIT_t, EBIT3,
+                   EBITDA_l, EBITDA_t, EBITDA3, R3,
+                   S, to, prc_xrd, prc_int, MB, age, L, hhi, hhi2, fyr,
+                   indMB, indto, indage, NEST, naics4, lc_naics, EBITDA4, R4)
+
+# Export
+write.csv(df, "dataset_mod3.csv", row.names = F)
+```
+
+
+
+
+
+Reload smaller dataframe
+```{r}
+# Clear data
+rm(list=ls())
+
+# Load data
+df = read.delim2("dataset_mod3.csv", sep = ",")
+
+# Adjust classes
+x = colnames(df)
+x = x[!(x %in% c("COMNAM"))]
+
+for (i in x) {
+  df[[i]] = as.numeric(as.character(df[[i]]))
+}
+
+x = c("year", "PERMCO", "GVKEY", "sic4", "sic3", "sic2", "sic1", "naics4")
+
+for (i in x) {
+  df[[i]] = factor(df[[i]])
+}
+
+
+# Replace coverage NAs with 0
+df$NEST = replace_na(df$NEST, 0)
+
+# Rescale some vars
+df$S = log(df$S)
+df$hhi = log(df$hhi)
+df$hhi2 = log(df$hhi2)
+df$lc3 = log(df$tlist3)
+df$lc4 = log(df$tlist4)
+df$lc_naics = log(df$lc_naics)
+df$NEST = log(df$NEST+1)
+
+df$lc3l = log(df$tlist3l)
+df$lc3l[is.infinite(df$lc3l)] = NA
+
+# Drop other NAs
+df = drop_na(df, EBITDA_l)
+df = drop_na(df, EBITDA_t)
+df = drop_na(df, EBITDA3)
+df = drop_na(df, R3)
+df = drop_na(df, S)
+df = drop_na(df, hhi2)
+df = drop_na(df, to)
+df = drop_na(df, prc_int)
+df = drop_na(df, MB)
+df = drop_na(df, age)
+df = drop_na(df, L)
+
+# Drop 1975 and 2017 obs
+df = subset(df, year != "2017")
+df = subset(df, year != "1975")
+
+# Unique obs
+length(unique(df$PERMCO))
+length(unique(df$sic3))
+```
+
+
+Basic Stats and Correlations
+```{r}
+# Create summary stats
+x = df %>% select(r0, R3, EBITDA_l, EBITDA_t, EBITDA3, lc3, NEST, to, S, hhi2, MB,
+                  indMB, prc_int, age, indage, L)
+stats = basicStats(x)
+stats = round(stats, 2)
+stats <- stats[c("Minimum", "1. Quartile","Median", "3. Quartile",
+                 "Maximum", "Mean", "Stdev"),]
+stats = t(stats)
+
+
+# Rename to latex
+colnames(stats) = c("Min", "25\\textsuperscript{th}", "Median", "75\\textsuperscript{th}",
+                    "Max", "Mean", "SD")
+rownames(stats) = c("$r_{t}$", "$R3_{t}$", "$E_{t-1}$", "$E_{t}$", "$E3_{t}$", "$LC_{t}$",
+                    "$NEST_{t}$", "$TO_{t}$", "$S_{t}$", "$HHI_{t}$", "$M\B_{t}$",
+                    "$IndM\B_{t}$", "$Int_{t}$", "$Age_{t}$", "$IndAge_{t}$", "$L_{t}$")
+
+# Summary stats table
+stargazer(stats, type = "latex")
+
+
+# Create correlation table
+mcor = round(cor(x),2)
+mcor[upper.tri(mcor)] = ""
+mcor = as.data.frame(mcor)
+
+# Rename and stargaze
+colnames(mcor) = rownames(stats)
+rownames(mcor) = rownames(stats)
+stargazer(mcor, type = "latex", summary = F)
+```
+
+
+Number of observations by industry group and year
+```{r}
+# Number of observations by year
+yobs = df %>% group_by(year) %>% summarise(sic3 = length(unique(sic3)),
+                                            firmy = n())
+# Rename to latex
+colnames(yobs) = c("Year", "Unique 3-digit industries", "Firm-year observations")
+yobs$Year = as.numeric(as.character(yobs$Year))
+stargazer(yobs, type = "latex", summary = F, rownames = F)
+
+
+
+# Number of observations per industry group
+inds = c("01-09", "10-14", "15-17", "20-39", "40-49", "50-51", "52-59",
+         "60-67", "70-89", "91-99")
+x = c("Agriculture, Forestry, Fishing", "Mining", "Construction", "Manufacturing",
+      "Transportation and Public Utilities", "Wholesale Trade", "Retail Trade",
+      "Finance, Insurance, Real Estate", "Services", "Public Administration")
+inds = as.data.frame(cbind(inds, x))
+colnames(inds) = c("group", "indname ")
+inds["No_inds"] = ""
+inds["No_firms"] = ""
+inds["No_FirmY"] = ""
+
+for (i in as.character(inds$group)){
+  loop = match(i, as.character(inds$group))
+  print(loop)
+  
+  j = as.numeric(unlist(strsplit(i[1], "-")))
+  
+  x = subset(df, as.numeric(as.character(sic2)) >= j[[1]] &
+               as.numeric(as.character(sic2)) <= j[2])
+  
+  inds[loop, 3] = length(unique(x$sic3))
+  inds[loop, 4] = length(unique(x$PERMCO))
+  inds[loop, 5] = nrow(x)
+}
+inds[[3]] = as.numeric(inds[[3]])
+inds[[4]] = as.numeric(inds[[4]])
+inds[[5]] = as.numeric(inds[[5]])
+
+# Stargaze
+colnames(inds) = c("SIC range", "Industry group", "Unique 3-digit industries", "Unique firms", "Firm-year obs")
+stargazer(inds, type = "latex", summary = F, rownames = F)
+```
+
+
+Create interactions
+```{r}
+# Reorder dataframe columns
+x = df %>% select(lc3, lc4, lc_naics, lc3l)
+df = df %>% select(-lc3, -lc4, -lc_naics, -lc3l)
+df = cbind(df, x)
+
+# Select variables to be interacted with
+interact = df %>% select(year, PERMCO,
+                         EBIT_l, EBIT_t, EBIT3,
+                         EBITDA_l, EBITDA_t, EBITDA3, EBITDA4,
+                         R3, R4)
+
+# Interact with total listings SIC3
+interact_list = interact
+interact_list[3:ncol(interact)] = interact_list[3:ncol(interact)] * df$lc3
+colnames(interact_list)[3:ncol(interact)] = 
+  paste("lc3",colnames(interact[3:ncol(interact)]),sep="_")
+df = left_join(df, interact_list, by = c("year", "PERMCO"))
+
+# LC4
+interact_list = interact
+interact_list[3:ncol(interact)] = interact_list[3:ncol(interact)] * df$lc4
+colnames(interact_list)[3:ncol(interact)] = 
+  paste("lc4",colnames(interact[3:ncol(interact)]),sep="_")
+df = left_join(df, interact_list, by = c("year", "PERMCO"))
+
+# NAICS
+interact_list = interact
+interact_list[3:ncol(interact)] = interact_list[3:ncol(interact)] * df$lc_naics
+colnames(interact_list)[3:ncol(interact)] = 
+  paste("lcnaics",colnames(interact[3:ncol(interact)]),sep="_")
+df = left_join(df, interact_list, by = c("year", "PERMCO"))
+
+# Lagged SIC3
+interact_list = interact
+interact_list[3:ncol(interact)] = interact_list[3:ncol(interact)] * df$lc3l
+colnames(interact_list)[3:ncol(interact)] = 
+  paste("lc3l",colnames(interact[3:ncol(interact)]),sep="_")
+df = left_join(df, interact_list, by = c("year", "PERMCO"))
+
+# Size
+interact_list = interact
+interact_list[3:ncol(interact)] = interact_list[3:ncol(interact)] * df$S
+colnames(interact_list)[3:ncol(interact)] = 
+  paste("S",colnames(interact[3:ncol(interact)]),sep="_W__")
+df = left_join(df, interact_list, by = c("year", "PERMCO"))
+
+# Turnover
+interact_list = interact
+interact_list[3:ncol(interact)] = interact_list[3:ncol(interact)] * df$to
+colnames(interact_list)[3:ncol(interact)] = 
+  paste("to",colnames(interact[3:ncol(interact)]),sep="_W_")
+df = left_join(df, interact_list, by = c("year", "PERMCO"))
+
+# Industry turnover
+interact_list = interact
+interact_list[3:ncol(interact)] = interact_list[3:ncol(interact)] * df$indto
+colnames(interact_list)[3:ncol(interact)] = 
+  paste("indto",colnames(interact[3:ncol(interact)]),sep="_W__")
+df = left_join(df, interact_list, by = c("year", "PERMCO"))
+
+#R&D
+interact_list = interact
+interact_list[3:ncol(interact)] = interact_list[3:ncol(interact)] * df$prc_xrd
+colnames(interact_list)[3:ncol(interact)] = 
+paste("xrd",colnames(interact[3:ncol(interact)]),sep="_W__")
+df = left_join(df, interact_list, by = c("year", "PERMCO"))
+
+# M/B
+interact_list = interact
+interact_list[3:ncol(interact)] = interact_list[3:ncol(interact)] * df$MB
+colnames(interact_list)[3:ncol(interact)] = 
+  paste("MB",colnames(interact[3:ncol(interact)]),sep="_W__")
+df = left_join(df, interact_list, by = c("year", "PERMCO"))
+
+# Industry M/B
+interact_list = interact
+interact_list[3:ncol(interact)] = interact_list[3:ncol(interact)] * df$indMB
+colnames(interact_list)[3:ncol(interact)] = 
+  paste("indMB",colnames(interact[3:ncol(interact)]),sep="_W__")
+df = left_join(df, interact_list, by = c("year", "PERMCO"))
+
+# Age
+interact_list = interact
+interact_list[3:ncol(interact)] = interact_list[3:ncol(interact)] * df$age
+colnames(interact_list)[3:ncol(interact)] = 
+  paste("age",colnames(interact[3:ncol(interact)]),sep="_W__")
+df = left_join(df, interact_list, by = c("year", "PERMCO"))
+
+# Industry Age
+interact_list = interact
+interact_list[3:ncol(interact)] = interact_list[3:ncol(interact)] * df$indage
+colnames(interact_list)[3:ncol(interact)] = 
+  paste("indage",colnames(interact[3:ncol(interact)]),sep="_W__")
+df = left_join(df, interact_list, by = c("year", "PERMCO"))
+
+# Loss indicator
+interact_list = interact
+interact_list[3:ncol(interact)] = interact_list[3:ncol(interact)] * df$L
+colnames(interact_list)[3:ncol(interact)] = 
+  paste("L",colnames(interact[3:ncol(interact)]),sep="_W__")
+df = left_join(df, interact_list, by = c("year", "PERMCO"))
+
+# HHI
+interact_list = interact
+interact_list[3:ncol(interact)] = interact_list[3:ncol(interact)] * df$hhi2
+colnames(interact_list)[3:ncol(interact)] = 
+  paste("hhi",colnames(interact[3:ncol(interact)]),sep="_W__")
+df = left_join(df, interact_list, by = c("year", "PERMCO"))
+
+# Intangibles
+interact_list = interact
+interact_list[3:ncol(interact)] = interact_list[3:ncol(interact)] * df$prc_int
+colnames(interact_list)[3:ncol(interact)] = 
+paste("prc_int",colnames(interact[3:ncol(interact)]),sep="_W__")
+df = left_join(df, interact_list, by = c("year", "PERMCO"))
+
+# Coverage
+interact_list = interact
+interact_list[3:ncol(interact)] = interact_list[3:ncol(interact)] * df$NEST
+colnames(interact_list)[3:ncol(interact)] = 
+paste("NEST",colnames(interact[3:ncol(interact)]),sep="_W_")
+df = left_join(df, interact_list, by = c("year", "PERMCO"))
+
+# Write interacted df
+write.csv(df, "dataset_interacted.csv", row.names = F)
+```
+
+
+Create full model formula
+```{r}
+# Save version of df
+df1 = df
+
+# Drop EBIT variables
+x = !grepl("EBIT_", colnames(df))
+y = df[x]
+x = !grepl("EBIT3", colnames(y))
+y = y[x]
+
+# Drop 3-digit sic variables
+x = !grepl("lc4", colnames(y))
+y = y[x]
+
+# Drop other variables that should not be included in the regression formula
+exc = c("r0", "PERMCO", "GVKEY", "sic4", "sic3", "sic2", "sic1", "tlist3", "tlist4",
+      "tlist3l", "year", "fyr", "hhi", "naics")
+exc = colnames(y)[!(colnames(y) %in% exc)]
+exc = exc[!grepl("xrd", exc)]
+#exc = exc[!grepl("int", exc)]
+exc = exc[!grepl("div", exc)]
+exc = exc[!grepl("NEST", exc)]
+exc = exc[!grepl("to", exc)]
+exc = exc[!grepl("indto", exc)]
+exc = exc[!grepl("naics", exc)]
+exc = exc[!grepl("lc3l", exc)]
+exc = exc[!grepl("R4", exc)]
+exc = exc[!grepl("EBITDA4", exc)]
+
+# Create formula for full model with all controls
+f <- as.formula(paste("r0 ~", paste(exc, collapse = " + ")))
+f
+```
+
+
+Examine full model for heteroscedasticity and standard error adjustments
+```{r}
+# Full model Breusch-pagan test for heteroscedasticity
+bptest(f, data = df)
+
+
+# Base formula
+f1 = as.formula("r0 ~ EBITDA_l + EBITDA_t + EBITDA3 + R3 +
+            lc3 + lc3_EBITDA_l + lc3_EBITDA_t + lc3_EBITDA3 + lc3_R3")
+
+# Pooled model
+mod0 = plm(f1,
+          data = df,
+          index = c("year", "PERMCO"),
+          model = "pool"
+          )
+
+# Run fixed effects model
+mod1 = plm(f1,
+          data = df,
+          index = c("year", "PERMCO"),
+          model = "within"
+          )
+
+# Breusch-Pagan lagrange multiplier test to confirm fixed effects are better than pooled
+plmtest(mod1, c("time"), type=c("bp"))
+```
+
+
+Run models with each new control
+```{r}
+# Create sets of variables to use for each model
+exc1 = c(exc, "sic1", "sic1:EBITDA_l", "sic1:EBITDA_t", "sic1:EBITDA3", "sic1:R3",
+         "year", "year:EBITDA_l", "year:EBITDA_t", "year:EBITDA3", "year:R3")
+exc2 = exc1[!grepl("to", exc1)]
+exc2 = exc2[!grepl("L", exc2)]
+exc2 = exc2[!grepl("age", exc2)]
+exc2 = exc2[!grepl("int", exc2)]
+#exc2 = exc2[!grepl("S", exc2)]
+#exc2 = exc2[!grepl("hhi", exc2)]
+#exc2 = exc2[!grepl("MB", exc2)]
+
+exc3 = c(exc2[!grepl(c("year"),exc2)])
+exc3 = c(exc3[!grepl(c("sic"),exc3)])
+exc4 = c(exc3[!grepl(c("MB"),exc3)])
+exc5 = c(exc4[!grepl(c("hhi"),exc4)])
+exc6 = c(exc5[!grepl(c("S"),exc5)])
+
+# exc3 = c(exc2[!grepl(c("int"),exc2)], exc1[grepl(c("MB"),exc1)])
+# exc4 = c(exc3[!grepl(c("MB"),exc3)], exc1[grepl(c("hhi"),exc1)])
+# exc5 = c(exc4[!grepl(c("hhi"),exc4)], exc1[grepl(c("S"),exc1)])
+# exc6 = c(exc5[!grepl(c("S"),exc5)])
+
+
+# Test
+# f <- as.formula(paste("r0 ~", paste(exc1, collapse = " + ")))
+# mod = lm(f, data = df)
+# summary(mod)
+# linearHypothesis(mod, c("lc3_EBITDA3", "lc3_R3"), test="F")[2,6]
+
+# Run each model and save stats
+x = paste("exc", 1:6, sep = "")
+x = rev(x)
+mods = list()
+mod_stats = as.data.frame(matrix(nrow = 4, ncol = length(x)))
+for (i in x) {
+  
+  # Model number
+  loop = match(i, x)
+  print(loop)
+  
+  # Call model formula
+  v = get(i)
+  f <- as.formula(paste("r0 ~", paste(v, collapse = " + ")))
+  
+  # Run model
+  mod = lm(f, data = df)
+  
+  # Save model stats
+  mod_stats[1, loop] = nobs(mod)
+  mod_stats[2, loop] = summary(mod)$r.squared
+  mod_stats[3, loop] = linearHypothesis(mod, c("lc3_EBITDA3", "lc3_R3"), test="F")[2,5]
+  mod_stats[4, loop] = linearHypothesis(mod, c("lc3_EBITDA3", "lc3_R3"), test="F")[2,6]
+  
+  # White SE
+  mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+  
+  # Create list of models
+  mods[[loop]] = mod
+}
+```
+
+
+Set up info for tables
+```{r}
+# FERC model
+mod9 = lm(r0 ~ EBITDA_l + EBITDA_t + EBITDA3 + R3,
+          data = df)
+
+# Get stats
+n = as.numeric(unlist(c(nobs(mod9), mod_stats[1,])))
+r2 = as.numeric(unlist(c(summary(mod9)$r.squared, mod_stats[2,])))
+r2 = format(round(r2, digits=2), nsmall = 2) 
+F2 = as.numeric(unlist(c("", mod_stats[4,])))
+F2 = format(round(F2, digits=4), nsmall = 4)
+F1 = as.numeric(unlist(c("", mod_stats[3,])))
+F1 = format(round(F1, digits=2), nsmall = 2)
+
+# Control identifiers
+ctrl = c("No", "No", "No", "No", "No", "No", "Yes", "Yes", "Yes", "Yes", "Yes", "Yes")
+dum = c("No", "No", "No", "No", "No", "Yes", "Yes", "Yes", "Yes", "Yes", "Yes", "Yes")
+FE = c("No", "No", "No", "No", "No", "Yes", "Yes", "Yes", "Yes", "Yes", "Yes", "Yes")
+SE = c("No", "Yes", "Yes", "Yes", "Yes", "Yes", "Yes", "Yes", "Yes")
+med = c("No", "No", "No", "No", "No", "No", "No", "No", "No")
+
+S = c("No", "No", "Yes", "Yes", "Yes", "Yes", "Yes", "Yes", "Yes")
+hhi = c("No", "No", "No", "Yes",  "Yes", "Yes", "Yes", "Yes", "Yes", "Yes")
+MB = c("No", "No", "No", "No", "Yes", "Yes", "Yes", "Yes", "Yes", "Yes", "Yes", "Yes")
+#int = c("No", "No", "No", "No", "No", "Yes", "Yes", "Yes", "Yes", "Yes", "Yes", "Yes")
+#age = c("No", "No", "No", "No", "No", "No", "Yes", "Yes", "Yes", "Yes", "Yes", "Yes")
+#L = c("No", "No", "No", "No", "No", "No", "No", "Yes", "Yes", "Yes", "Yes", "Yes")
+#xrd = c("No", "No", "No", "No", "No", "No", "No", "No", "Yes", "Yes", "Yes", "Yes")
+
+# Add FERC model into list of models
+mod9 = coeftest(mod9, vcov = vcovHC(mod9, type = "HC0"))
+x = list()
+x[[1]] = mod9
+mods = c(x, mods)
+```
+
+
+Create tables
+```{r}
+# Table with incremental controls
+choose = c(1:7)
+stargazer(mods[choose],
+          type="latex",
+          omit = c("Cons", "_W_", "sic", "S", "to", "prc_xrd", "age", "MB", "L",
+                   "hhi", "19", "20", "int"),
+          model.names = F,
+          dep.var.labels.include = F,
+          dep.var.caption = "",
+          omit.stat=c("f", "ser", "rsq"),
+          covariate.labels = c("$E_{t-1}$", "$E_{t}$", "$E3_{t}$", "$R3_{t}$",
+                               "$LC_{t}$", "$LC_{t}*E_{t-1}$", "$LC_{t}*E_{t}$",
+                               "$LC_{t}*E3_{t}$", "$LC_{t}*R3_{t}$"),
+          add.lines=list(c('Size controls', S[choose]),
+                         c('HHI controls', hhi[choose]),
+                         c('M/B ratio controls', MB[choose]),
+                         #c('Intangibles controls', int[choose]),
+                         #c('Age controls', age[choose]),
+                         #c('Loss identifier controls', L[choose]),
+                         #c('R\\&D controls', xrd[choose]),
+                         c('Other controls', ctrl[choose]),
+                         c('Mediators', med[choose]),
+                         c('Industry dummies', dum[choose]),
+                         c('Year fixed effects', FE[choose]),
+                         c('Adjusted SE', SE[choose]),
+                         c("Observations", n[choose]),
+                         c("Adjusted R2", r2[choose])))
+                         #c("F-stat on combined", F1[choose]),
+                         #c("$LC_{t}*E3_{t}$ and $LC_{t}*R3_{t}$", F2[choose])))
+```
+
+
+Variation over time
+```{r}
+# Select model
+exc_y = c(exc, "sic1", "sic1:EBITDA_l", "sic1:EBITDA_t", "sic1:EBITDA3", "sic1:R3")
+f <- as.formula(paste("r0 ~", paste(exc_y, collapse = " + ")))
+
+# Create year intervals
+first = min(as.numeric(as.character(df$year)))
+last = max(as.numeric(as.character(df$year)))
+step = 1
+x = seq(first, last, step)
+
+# Run model on intervals
+y_obs = as.data.frame(matrix(nrow = 1, ncol = length(x)))
+y_coef = as.data.frame(matrix(nrow = length(x), ncol = 7))
+mods_y = list()
+for (i in x){
+  
+  # Loop number
+  loop = (i-first+step)/step
+  print(loop)
+  
+  # Subset obs within interval
+  y = subset(df, as.numeric(as.character(year)) >= i &
+                              as.numeric(as.character(year)) < i+5)
+  
+  # Run model
+  mod = lm(f, data = y)
+  
+  # Save model stats
+  y_obs[1, loop] = nobs(mod)
+  
+  # White SE
+  mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+  
+  # Save coefficients
+  y_coef[loop,1] = i
+  y_coef[loop,2] = mod["lc3_EBITDA_l",1]
+  y_coef[loop,3] = mod["lc3_EBITDA_t",1]
+  y_coef[loop,4] = mod["lc3_EBITDA3",1]
+  y_coef[loop,5] = mod["lc3_EBITDA_l",2]
+  y_coef[loop,6] = mod["lc3_EBITDA_t",2]
+  y_coef[loop,7] = mod["lc3_EBITDA3",2]
+  
+  # Create list of models
+  mods_y[[loop]] = mod
+}
+
+# Create graph
+colnames(y_coef) = c("year", "PERC", "ERC", "FERC",
+                     "PERC_se", "ERC_se", "FERC_se"
+                     )
+windowsFonts(Times=windowsFont("Times New Roman"))
+p = ggplot(y_coef, aes(x=year, y=FERC)) + 
+    geom_errorbar(aes(ymin=FERC-FERC_se*1.96, ymax=FERC+FERC_se*1.96), width=.5) +
+    geom_point() +
+    scale_x_continuous(breaks = min(y_coef$year):max(y_coef$year), expand = c(0,1)) +
+    theme(axis.line = element_line(colour = "black"),
+        panel.background = element_blank(),
+        panel.grid.major.y = element_line(color = "grey80"),
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+        axis.title.x=element_blank(),
+        text=element_text(family="Times")) +
+    geom_smooth(method = "lm", se=FALSE, color="red", size = 0.5) +
+    ylab("Coefficient on listing count interaction")
+p
+ggsave("Images\\FERC_over_time.png", p, width = 16.5, height = 7, units = "cm")
+
+p = ggplot(y_coef, aes(x=year, y=ERC)) + 
+    geom_errorbar(aes(ymin=ERC-ERC_se*1.96, ymax=ERC+ERC_se*1.96), width=.5) +
+    geom_point() +
+    scale_x_continuous(breaks = min(y_coef$year):max(y_coef$year), expand = c(0,1)) +
+    theme(axis.line = element_line(colour = "black"),
+        panel.background = element_blank(),
+        panel.grid.major.y = element_line(color = "grey80"),
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+        axis.title.x=element_blank(),
+        text=element_text(family="Times")) +
+    geom_smooth(method = "lm", se=FALSE, color="red", size = 0.5) +
+    ylab("Coefficient on listing count interaction")
+p
+ggsave("Images\\ERC_over_time.png", p, width = 16.5, height = 7, units = "cm")
+```
+
+
+
+
+Other cross-sectional tests
+```{r}
+# Select formula
+f <- as.formula(paste("r0 ~", paste(exc1, collapse = " + ")))
+
+# Create ranks
+df = df %>% mutate(rank_S = percent_rank(S))
+df = df %>% mutate(rank_int = percent_rank(prc_int))
+df = df %>% mutate(rank_MB = percent_rank(MB))
+df = df %>% mutate(rank_lc = percent_rank(lc3))
+df = df %>% mutate(rank_age = percent_rank(age))
+
+# Create containers
+csx_obs = as.data.frame(matrix(nrow = 1, ncol = 2))
+mods_csx = list()
+
+# Run lower listing count model
+n = 1
+y = subset(df, rank_lc <=0.25)
+mod = lm(f, data = y)
+csx_obs[1, n] = nobs(mod)
+csx_obs[2, n] = summary(mod)$r.squared
+csx_obs[3, n] = linearHypothesis(mod, c("lc3_EBITDA3", "lc3_R3"), test="F")[2,5]
+csx_obs[4, n] = linearHypothesis(mod, c("lc3_EBITDA3", "lc3_R3"), test="F")[2,6]
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_csx[[n]] = mod
+
+# Run higher listing count model
+n = n+1
+y = subset(df, rank_lc >0.75)
+mod = lm(f, data = y)
+csx_obs[1, n] = nobs(mod)
+csx_obs[2, n] = summary(mod)$r.squared
+csx_obs[3, n] = linearHypothesis(mod, c("lc3_EBITDA3", "lc3_R3"), test="F")[2,5]
+csx_obs[4, n] = linearHypothesis(mod, c("lc3_EBITDA3", "lc3_R3"), test="F")[2,6]
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_csx[[n]] = mod
+
+  
+# Run lower size model
+n = n+1
+y = subset(df, rank_S <=0.25)
+mod = lm(f, data = y)
+csx_obs[1, n] = nobs(mod)
+csx_obs[2, n] = summary(mod)$r.squared
+csx_obs[3, n] = linearHypothesis(mod, c("lc3_EBITDA3", "lc3_R3"), test="F")[2,5]
+csx_obs[4, n] = linearHypothesis(mod, c("lc3_EBITDA3", "lc3_R3"), test="F")[2,6]
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_csx[[n]] = mod
+
+# Run higher size model
+n = n+1
+y = subset(df, rank_S >0.75)
+mod = lm(f, data = y)
+csx_obs[1, n] = nobs(mod)
+csx_obs[2, n] = summary(mod)$r.squared
+csx_obs[3, n] = linearHypothesis(mod, c("lc3_EBITDA3", "lc3_R3"), test="F")[2,5]
+csx_obs[4, n] = linearHypothesis(mod, c("lc3_EBITDA3", "lc3_R3"), test="F")[2,6]
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_csx[[n]] = mod
+
+# Run lower growth model
+n = n+1
+y = subset(df, rank_MB <=0.25)
+mod = lm(f, data = y)
+csx_obs[1, n] = nobs(mod)
+csx_obs[2, n] = summary(mod)$r.squared
+csx_obs[3, n] = linearHypothesis(mod, c("lc3_EBITDA3", "lc3_R3"), test="F")[2,5]
+csx_obs[4, n] = linearHypothesis(mod, c("lc3_EBITDA3", "lc3_R3"), test="F")[2,6]
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_csx[[n]] = mod
+
+# Run higher growth model
+n = n+1
+y = subset(df, rank_MB >0.75)
+mod = lm(f, data = y)
+csx_obs[1, n] = nobs(mod)
+csx_obs[2, n] = summary(mod)$r.squared
+csx_obs[3, n] = linearHypothesis(mod, c("lc3_EBITDA3", "lc3_R3"), test="F",
+                                 singular.ok = T)[2,5]
+csx_obs[4, n] = linearHypothesis(mod, c("lc3_EBITDA3", "lc3_R3"), test="F",
+                                 singular.ok = T)[2,6]
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_csx[[n]] = mod
+
+# Run lower intangible model
+n = n+1
+y = subset(df, rank_int <=0.25)
+mod = lm(f, data = y)
+csx_obs[1, n] = nobs(mod)
+csx_obs[2, n] = summary(mod)$r.squared
+csx_obs[3, n] = linearHypothesis(mod, c("lc3_EBITDA3", "lc3_R3"), test="F",
+                                 singular.ok = T)[2,5]
+csx_obs[4, n] = linearHypothesis(mod, c("lc3_EBITDA3", "lc3_R3"), test="F",
+                                 singular.ok = T)[2,6]
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_csx[[n]] = mod
+
+# Run higher intangible model
+n = n+1
+y = subset(df, rank_int >0.75)
+mod = lm(f, data = y)
+csx_obs[1, n] = nobs(mod)
+csx_obs[2, n] = summary(mod)$r.squared
+csx_obs[3, n] = linearHypothesis(mod, c("lc3_EBITDA3", "lc3_R3"), test="F")[2,5]
+csx_obs[4, n] = linearHypothesis(mod, c("lc3_EBITDA3", "lc3_R3"), test="F")[2,6]
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_csx[[n]] = mod
+
+
+# Run younger model
+n = n+1
+y = subset(df, rank_age <=0.25)
+mod = lm(f, data = y)
+csx_obs[1, n] = nobs(mod)
+csx_obs[2, n] = summary(mod)$r.squared
+csx_obs[3, n] = linearHypothesis(mod, c("lc3_EBITDA3", "lc3_R3"), test="F",
+                                 singular.ok = T)[2,5]
+csx_obs[4, n] = linearHypothesis(mod, c("lc3_EBITDA3", "lc3_R3"), test="F",
+                                 singular.ok = T)[2,6]
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_csx[[n]] = mod
+
+# Run older model
+n = n+1
+y = subset(df, rank_age >0.75)
+mod = lm(f, data = y)
+csx_obs[1, n] = nobs(mod)
+csx_obs[2, n] = summary(mod)$r.squared
+csx_obs[3, n] = linearHypothesis(mod, c("lc3_EBITDA3", "lc3_R3"), test="F")[2,5]
+csx_obs[4, n] = linearHypothesis(mod, c("lc3_EBITDA3", "lc3_R3"), test="F")[2,6]
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_csx[[n]] = mod
+```
+
+
+Cross-sectional tests table
+```{r}
+# Get stats
+n = as.numeric(unlist(csx_obs[1,]))
+r2 = as.numeric(unlist(csx_obs[2,]))
+r2 = format(round(r2, digits=2), nsmall = 2) 
+F1 = as.numeric(unlist(csx_obs[3,]))
+F1 = format(round(F1, digits=2), nsmall = 2)
+F2 = as.numeric(unlist(csx_obs[4,]))
+F2 = format(round(F2, digits=4), nsmall = 4)
+
+# Create table
+choose = 7
+rep = 10
+stargazer(mods_csx,
+          type="latex",
+          omit = c("Cons", "_W_", "sic", "S", "to", "prc_xrd", "age", "MB", "L", "hhi",
+                   "19", "20", "int"),
+          model.names = F,
+          dep.var.labels.include = F,
+          dep.var.caption = "",
+          omit.stat=c("f", "ser", "rsq"),
+          covariate.labels = c("$E_{t-1}$", "$E_{t}$", "$E3_{t}$", "$R3_{t}$",
+                               "$LC_{t}$", "$LC_{t}*E_{t-1}$", "$LC_{t}*E_{t}$",
+                               "$LC_{t}*E3_{t}$", "$LC_{t}*R3_{t}$"),
+          add.lines=list(#c('Size controls', rep(S[choose],rep)),
+                         #c('HHI controls', rep(hhi[choose], rep)),
+                         #c('M/B ratio controls', rep(MB[choose], rep)),
+                         #c('Intangibles controls', rep(int[choose], rep)),
+                         #c('Age controls', age[choose]),
+                         #c('Loss identifier controls', L[choose]),
+                         #c('R\\&D controls', xrd[choose]),
+                         c('Controls', rep(ctrl[choose], rep)),
+                         c('Mediators', rep(med[choose], rep)),
+                         c('Industry dummies', rep(dum[choose], rep)),
+                         c('Year fixed effects', rep(FE[choose], rep)),
+                         c('Adjusted SE', rep(SE[choose], rep)),
+                         c("Observations", n),
+                         c("Adjusted R2", r2)))
+                         #c("F-stat on combined", F1),
+                         #c("$LC_{t}*E3_{t}$ and $LC_{t}*R3_{t}$", F2)))
+
+
+# Z tests
+x = mods_csx[[1]]["lc3_EBITDA3",][1:2]
+x = rbind(x, mods_csx[[2]]["lc3_EBITDA3",][1:2])
+x = rbind(x, mods_csx[[3]]["lc3_EBITDA3",][1:2])
+x = rbind(x, mods_csx[[4]]["lc3_EBITDA3",][1:2])
+x = rbind(x, mods_csx[[5]]["lc3_EBITDA3",][1:2])
+x = rbind(x, mods_csx[[6]]["lc3_EBITDA3",][1:2])
+x = rbind(x, mods_csx[[7]]["lc3_EBITDA3",][1:2])
+x = rbind(x, mods_csx[[8]]["lc3_EBITDA3",][1:2])
+x = rbind(x, mods_csx[[9]]["lc3_EBITDA3",][1:2])
+x = rbind(x, mods_csx[[10]]["lc3_EBITDA3",][1:2])
+rownames(x) = 1:10
+x = as.data.frame(x)
+x$n = n
+
+
+z = matrix(nrow = 5, ncol = 3)
+
+z[1,1] = x[1, 1] - x[2, 1]
+z[1,2] = (x[1, 1] - x[2, 1])/sqrt(x[1, 2]^2 + x[2, 2]^2)
+z[1,3] = 1-pnorm(abs(z[1,2]))
+
+z[2,1] = x[3, 1] - x[4, 1]
+z[2,2] = (x[3, 1] - x[4, 1])/sqrt(x[3, 2]^2 + x[4, 2]^2)
+z[2,3] = 1-pnorm(abs(z[2,2]))
+
+z[3,1] = x[5, 1] - x[6, 1]
+z[3,2] = (x[5, 1] - x[6, 1])/sqrt(x[5, 2]^2 + x[6, 2]^2)
+z[3,3] = 1-pnorm(abs(z[3,2]))
+
+z[4,1] = x[7, 1] - x[8, 1]
+z[4,2] = (x[7, 1] - x[8, 1])/sqrt(x[7, 2]^2 + x[8, 2]^2)
+z[4,3] = 1-pnorm(abs(z[4,2]))
+
+z[5,1] = x[9, 1] - x[10, 1]
+z[5,2] = (x[9, 1] - x[10, 1])/sqrt(x[9, 2]^2 + x[10, 2]^2)
+z[5,3] = 1-pnorm(abs(z[5,2]))
+
+z = round(z,2)
+z = as.data.frame(z)
+colnames(z) = c("Difference", "Z-score", "Significance")
+rownames(z) = c("Listing count", "Size", "M/B ratio", "Intangibles", "Age")
+z = t(z)
+
+stargazer(z, summary = F)
+```
+
+
+
+
+1975-2010 subsamples
+```{r}
+# Create ranks
+t = subset(df, as.numeric(as.character(year)) <2011)
+t = t %>% mutate(rank_S = percent_rank(S))
+t = t %>% mutate(rank_int = percent_rank(prc_int))
+t = t %>% mutate(rank_MB = percent_rank(MB))
+t = t %>% mutate(rank_age = percent_rank(age))
+
+
+# Create containers
+csx_obs2 = as.data.frame(matrix(nrow = 1, ncol = 2))
+mods_csx2 = list()
+  
+
+# Run model on full subsample
+n = 1
+mod = lm(f, data = t)
+csx_obs2[1, n] = nobs(mod)
+csx_obs2[2, n] = summary(mod)$r.squared
+csx_obs2[3, n] = linearHypothesis(mod, c("lc3_EBITDA3", "lc3_R3"), test="F")[2,5]
+csx_obs2[4, n] = linearHypothesis(mod, c("lc3_EBITDA3", "lc3_R3"), test="F")[2,6]
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_csx2[[n]] = mod
+
+
+# Run lower size model
+n = n+1
+y = subset(t, rank_S <=0.25)
+mod = lm(f, data = y)
+csx_obs2[1, n] = nobs(mod)
+csx_obs2[2, n] = summary(mod)$r.squared
+csx_obs2[3, n] = linearHypothesis(mod, c("lc3_EBITDA3", "lc3_R3"), test="F")[2,5]
+csx_obs2[4, n] = linearHypothesis(mod, c("lc3_EBITDA3", "lc3_R3"), test="F")[2,6]
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_csx2[[n]] = mod
+
+# Run higher size model
+n = n+1
+y = subset(t, rank_S >0.75)
+mod = lm(f, data = y)
+csx_obs2[1, n] = nobs(mod)
+csx_obs2[2, n] = summary(mod)$r.squared
+csx_obs2[3, n] = linearHypothesis(mod, c("lc3_EBITDA3", "lc3_R3"), test="F")[2,5]
+csx_obs2[4, n] = linearHypothesis(mod, c("lc3_EBITDA3", "lc3_R3"), test="F")[2,6]
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_csx2[[n]] = mod
+
+# Run lower growth model
+n = n+1
+y = subset(t, rank_MB <=0.25)
+mod = lm(f, data = y)
+csx_obs2[1, n] = nobs(mod)
+csx_obs2[2, n] = summary(mod)$r.squared
+csx_obs2[3, n] = linearHypothesis(mod, c("lc3_EBITDA3", "lc3_R3"), test="F")[2,5]
+csx_obs2[4, n] = linearHypothesis(mod, c("lc3_EBITDA3", "lc3_R3"), test="F")[2,6]
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_csx2[[n]] = mod
+
+# Run higher growth model
+n = n+1
+y = subset(t, rank_MB >0.75)
+mod = lm(f, data = y)
+csx_obs2[1, n] = nobs(mod)
+csx_obs2[2, n] = summary(mod)$r.squared
+csx_obs2[3, n] = linearHypothesis(mod, c("lc3_EBITDA3", "lc3_R3"), test="F",
+                                 singular.ok = T)[2,5]
+csx_obs2[4, n] = linearHypothesis(mod, c("lc3_EBITDA3", "lc3_R3"), test="F",
+                                 singular.ok = T)[2,6]
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_csx2[[n]] = mod
+
+# Run lower intangible model
+n = n+1
+y = subset(t, rank_int <=0.25)
+mod = lm(f, data = y)
+csx_obs2[1, n] = nobs(mod)
+csx_obs2[2, n] = summary(mod)$r.squared
+csx_obs2[3, n] = linearHypothesis(mod, c("lc3_EBITDA3", "lc3_R3"), test="F",
+                                 singular.ok = T)[2,5]
+csx_obs2[4, n] = linearHypothesis(mod, c("lc3_EBITDA3", "lc3_R3"), test="F",
+                                 singular.ok = T)[2,6]
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_csx2[[n]] = mod
+
+# Run higher intangible model
+n = n+1
+y = subset(t, rank_int >0.75)
+mod = lm(f, data = y)
+csx_obs2[1, n] = nobs(mod)
+csx_obs2[2, n] = summary(mod)$r.squared
+csx_obs2[3, n] = linearHypothesis(mod, c("lc3_EBITDA3", "lc3_R3"), test="F")[2,5]
+csx_obs2[4, n] = linearHypothesis(mod, c("lc3_EBITDA3", "lc3_R3"), test="F")[2,6]
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_csx2[[n]] = mod
+
+
+# Run lower intangible model
+n = n+1
+y = subset(t, rank_age <=0.25)
+mod = lm(f, data = y)
+csx_obs2[1, n] = nobs(mod)
+csx_obs2[2, n] = summary(mod)$r.squared
+csx_obs2[3, n] = linearHypothesis(mod, c("lc3_EBITDA3", "lc3_R3"), test="F",
+                                 singular.ok = T)[2,5]
+csx_obs2[4, n] = linearHypothesis(mod, c("lc3_EBITDA3", "lc3_R3"), test="F",
+                                 singular.ok = T)[2,6]
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_csx2[[n]] = mod
+
+# Run higher intangible model
+n = n+1
+y = subset(t, rank_age >0.75)
+mod = lm(f, data = y)
+csx_obs2[1, n] = nobs(mod)
+csx_obs2[2, n] = summary(mod)$r.squared
+csx_obs2[3, n] = linearHypothesis(mod, c("lc3_EBITDA3", "lc3_R3"), test="F")[2,5]
+csx_obs2[4, n] = linearHypothesis(mod, c("lc3_EBITDA3", "lc3_R3"), test="F")[2,6]
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_csx2[[n]] = mod
+
+
+
+
+# Get stats
+n = as.numeric(unlist(csx_obs2[1,]))
+r2 = as.numeric(unlist(csx_obs2[2,]))
+r2 = format(round(r2, digits=2), nsmall = 2) 
+F1 = as.numeric(unlist(csx_obs2[3,]))
+F1 = format(round(F1, digits=2), nsmall = 2)
+F2 = as.numeric(unlist(csx_obs2[4,]))
+F2 = format(round(F2, digits=4), nsmall = 4)
+
+# Create table
+rep = 10
+choose = 7
+stargazer(mods_csx2,
+          type="latex",
+          omit = c("Cons", "_W_", "sic", "S", "to", "prc_xrd", "age", "MB", "L", "hhi",
+                   "19", "20", "int"),
+          model.names = F,
+          dep.var.labels.include = F,
+          dep.var.caption = "",
+          omit.stat=c("f", "ser", "rsq"),
+          #covariate.labels = c("$E_{t-1}$", "$E_{t}$", "$E3_{t}$", "$R3_{t}$",
+                              # "$LC_{t}$", "$LC_{t}*E_{t-1}$", "$LC_{t}*E_{t}$",
+                              # "$LC_{t}*E3_{t}$", "$LC_{t}*R3_{t}$"),
+          add.lines=list(#c('Size controls', rep(S[choose],rep)),
+                         #c('HHI controls', rep(hhi[choose], rep)),
+                         #c('M/B ratio controls', rep(MB[choose], rep)),
+                         #c('Intangibles controls', rep(int[choose], rep)),
+                         #c('Age controls', age[choose]),
+                         #c('Loss identifier controls', L[choose]),
+                         #c('R\\&D controls', xrd[choose]),
+                         c('Controls', rep(ctrl[choose], rep)),
+                         c('Mediators', rep(med[choose], rep)),
+                         c('Industry dummies', rep(dum[choose], rep)),
+                         c('Year fixed effects', rep(FE[choose], rep)),
+                         c("Observations", n),
+                         c("Adjusted R2", r2)))
+                         #c("F-stat on combined", F1),
+                         #c("$LC_{t}*E3_{t}$ and $LC_{t}*R3_{t}$", F2)))
+```
+
+
+
+2011-2016 subsamples
+```{r}
+# Create ranks
+t = subset(df, as.numeric(as.character(year)) >=2011)
+t = t %>% mutate(rank_S = percent_rank(S))
+t = t %>% mutate(rank_int = percent_rank(prc_int))
+t = t %>% mutate(rank_MB = percent_rank(MB))
+t = t %>% mutate(rank_age = percent_rank(age))
+
+
+# Create containers
+csx_obs2 = as.data.frame(matrix(nrow = 1, ncol = 2))
+mods_csx2 = list()
+  
+
+# Run model on full subsample
+n = 1
+mod = lm(f, data = t)
+csx_obs2[1, n] = nobs(mod)
+csx_obs2[2, n] = summary(mod)$r.squared
+csx_obs2[3, n] = linearHypothesis(mod, c("lc3_EBITDA3", "lc3_R3"), test="F")[2,5]
+csx_obs2[4, n] = linearHypothesis(mod, c("lc3_EBITDA3", "lc3_R3"), test="F")[2,6]
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_csx2[[n]] = mod
+
+
+# Run lower size model
+n = n+1
+y = subset(t, rank_S <=0.25)
+mod = lm(f, data = y)
+csx_obs2[1, n] = nobs(mod)
+csx_obs2[2, n] = summary(mod)$r.squared
+csx_obs2[3, n] = linearHypothesis(mod, c("lc3_EBITDA3", "lc3_R3"), test="F")[2,5]
+csx_obs2[4, n] = linearHypothesis(mod, c("lc3_EBITDA3", "lc3_R3"), test="F")[2,6]
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_csx2[[n]] = mod
+
+# Run higher size model
+n = n+1
+y = subset(t, rank_S >0.75)
+mod = lm(f, data = y)
+csx_obs2[1, n] = nobs(mod)
+csx_obs2[2, n] = summary(mod)$r.squared
+csx_obs2[3, n] = linearHypothesis(mod, c("lc3_EBITDA3", "lc3_R3"), test="F")[2,5]
+csx_obs2[4, n] = linearHypothesis(mod, c("lc3_EBITDA3", "lc3_R3"), test="F")[2,6]
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_csx2[[n]] = mod
+
+# Run lower growth model
+n = n+1
+y = subset(t, rank_MB <=0.25)
+mod = lm(f, data = y)
+csx_obs2[1, n] = nobs(mod)
+csx_obs2[2, n] = summary(mod)$r.squared
+csx_obs2[3, n] = linearHypothesis(mod, c("lc3_EBITDA3", "lc3_R3"), test="F")[2,5]
+csx_obs2[4, n] = linearHypothesis(mod, c("lc3_EBITDA3", "lc3_R3"), test="F")[2,6]
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_csx2[[n]] = mod
+
+# Run higher growth model
+n = n+1
+y = subset(t, rank_MB >0.75)
+mod = lm(f, data = y)
+csx_obs2[1, n] = nobs(mod)
+csx_obs2[2, n] = summary(mod)$r.squared
+csx_obs2[3, n] = linearHypothesis(mod, c("lc3_EBITDA3", "lc3_R3"), test="F",
+                                 singular.ok = T)[2,5]
+csx_obs2[4, n] = linearHypothesis(mod, c("lc3_EBITDA3", "lc3_R3"), test="F",
+                                 singular.ok = T)[2,6]
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_csx2[[n]] = mod
+
+# Run lower intangible model
+n = n+1
+y = subset(t, rank_int <=0.25)
+mod = lm(f, data = y)
+csx_obs2[1, n] = nobs(mod)
+csx_obs2[2, n] = summary(mod)$r.squared
+csx_obs2[3, n] = linearHypothesis(mod, c("lc3_EBITDA3", "lc3_R3"), test="F",
+                                 singular.ok = T)[2,5]
+csx_obs2[4, n] = linearHypothesis(mod, c("lc3_EBITDA3", "lc3_R3"), test="F",
+                                 singular.ok = T)[2,6]
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_csx2[[n]] = mod
+
+# Run higher intangible model
+n = n+1
+y = subset(t, rank_int >0.75)
+mod = lm(f, data = y)
+csx_obs2[1, n] = nobs(mod)
+csx_obs2[2, n] = summary(mod)$r.squared
+csx_obs2[3, n] = linearHypothesis(mod, c("lc3_EBITDA3", "lc3_R3"), test="F")[2,5]
+csx_obs2[4, n] = linearHypothesis(mod, c("lc3_EBITDA3", "lc3_R3"), test="F")[2,6]
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_csx2[[n]] = mod
+
+# Run lower age model
+n = n+1
+y = subset(t, rank_age <=0.25)
+mod = lm(f, data = y)
+csx_obs2[1, n] = nobs(mod)
+csx_obs2[2, n] = summary(mod)$r.squared
+csx_obs2[3, n] = linearHypothesis(mod, c("lc3_EBITDA3", "lc3_R3"), test="F",
+                                 singular.ok = T)[2,5]
+csx_obs2[4, n] = linearHypothesis(mod, c("lc3_EBITDA3", "lc3_R3"), test="F",
+                                 singular.ok = T)[2,6]
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_csx2[[n]] = mod
+
+# Run higher age model
+n = n+1
+y = subset(t, rank_age >0.75)
+mod = lm(f, data = y)
+csx_obs2[1, n] = nobs(mod)
+csx_obs2[2, n] = summary(mod)$r.squared
+csx_obs2[3, n] = linearHypothesis(mod, c("lc3_EBITDA3", "lc3_R3"), test="F")[2,5]
+csx_obs2[4, n] = linearHypothesis(mod, c("lc3_EBITDA3", "lc3_R3"), test="F")[2,6]
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_csx2[[n]] = mod
+
+
+
+# Get stats
+n = as.numeric(unlist(csx_obs2[1,]))
+r2 = as.numeric(unlist(csx_obs2[2,]))
+r2 = format(round(r2, digits=2), nsmall = 2) 
+F1 = as.numeric(unlist(csx_obs2[3,]))
+F1 = format(round(F1, digits=2), nsmall = 2)
+F2 = as.numeric(unlist(csx_obs2[4,]))
+F2 = format(round(F2, digits=4), nsmall = 4)
+
+# Create table
+rep = 10
+choose = 7
+stargazer(mods_csx2,
+          type="latex",
+          omit = c("Cons", "_W_", "sic", "S", "to", "prc_xrd", "age", "MB", "L", "hhi",
+                   "19", "20", "int"),
+          model.names = F,
+          dep.var.labels.include = F,
+          dep.var.caption = "",
+          omit.stat=c("f", "ser", "rsq"),
+          covariate.labels = c("$E_{t-1}$", "$E_{t}$", "$E3_{t}$", "$R3_{t}$",
+                               "$LC_{t}$", "$LC_{t}*E_{t-1}$", "$LC_{t}*E_{t}$",
+                               "$LC_{t}*E3_{t}$", "$LC_{t}*R3_{t}$"),
+          add.lines=list(#c('Size controls', rep(S[choose],rep)),
+                         #c('HHI controls', rep(hhi[choose], rep)),
+                         #c('M/B ratio controls', rep(MB[choose], rep)),
+                         #c('Intangibles controls', rep(int[choose], rep)),
+                         #c('Age controls', age[choose]),
+                         #c('Loss identifier controls', L[choose]),
+                         #c('R\\&D controls', xrd[choose]),
+                         c('Controls', rep(ctrl[choose], rep)),
+                         c('Mediators', rep(med[choose], rep)),
+                         c('Industry dummies', rep(dum[choose], rep)),
+                         c('Year fixed effects', rep(FE[choose], rep)),
+                         c("Observations", n),
+                         c("Adjusted R2", r2)))
+                         #c("F-stat on combined", F1),
+                         #c("$LC_{t}*E3_{t}$ and $LC_{t}*R3_{t}$", F2)))
+```
+
+
+
+1975-2010 Z tests
+```{r}
+# Z tests
+x = mods_csx2[[2]]["lc3_EBITDA3",][1:2]
+x = rbind(x, mods_csx2[[3]]["lc3_EBITDA3",][1:2])
+x = rbind(x, mods_csx2[[4]]["lc3_EBITDA3",][1:2])
+x = rbind(x, mods_csx2[[5]]["lc3_EBITDA3",][1:2])
+x = rbind(x, mods_csx2[[6]]["lc3_EBITDA3",][1:2])
+x = rbind(x, mods_csx2[[7]]["lc3_EBITDA3",][1:2])
+x = rbind(x, mods_csx2[[8]]["lc3_EBITDA3",][1:2])
+x = rbind(x, mods_csx2[[9]]["lc3_EBITDA3",][1:2])
+rownames(x) = 1:8
+x = as.data.frame(x)
+
+
+z = matrix(nrow = 4, ncol = 3)
+
+z[1,1] = x[1, 1] - x[2, 1]
+z[1,2] = (x[1, 1] - x[2, 1])/sqrt(x[1, 2]^2 + x[2, 2]^2)
+z[1,3] = 1-pnorm(abs(z[1,2]))
+
+z[2,1] = x[3, 1] - x[4, 1]
+z[2,2] = (x[3, 1] - x[4, 1])/sqrt(x[3, 2]^2 + x[4, 2]^2)
+z[2,3] = 1-pnorm(abs(z[2,2]))
+
+z[3,1] = x[5, 1] - x[6, 1]
+z[3,2] = (x[5, 1] - x[6, 1])/sqrt(x[5, 2]^2 + x[6, 2]^2)
+z[3,3] = 1-pnorm(abs(z[3,2]))
+
+z[4,1] = x[7, 1] - x[8, 1]
+z[4,2] = (x[7, 1] - x[8, 1])/sqrt(x[7, 2]^2 + x[8, 2]^2)
+z[4,3] = 1-pnorm(abs(z[4,2]))
+
+
+z = round(z,2)
+z = as.data.frame(z)
+colnames(z) = c("Difference", "Z-score", "Significance")
+rownames(z) = c("Size", "M/B ratio", "Intangibles", "Age")
+z = t(z)
+
+stargazer(z, summary = F)
+
+```
+
+
+Chow test
+```{r}
+#y = subset(y_coef, as.numeric(as.character(year))>=2011)$FERC
+#x = subset(df[c(exc, "year")], as.numeric(as.character(year))<2011)
+#y = subset(df[c(exc, "year")], as.numeric(as.character(year))>=2011)
+f <- as.formula(paste("r0 ~", paste(exc1, collapse = " + ")))
+df = df %>% arrange(year)
+x = subset(df, as.numeric(as.character(year))<2011)
+sctest(f, data = df, type = "Chow", point = nrow(x)+1)
+```

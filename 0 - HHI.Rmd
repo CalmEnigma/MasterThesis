@@ -1,0 +1,68 @@
+---
+title: "HHI"
+author: "Albert Planting-Gyllenbaga (41669)"
+date: "16/03/2021"
+output: html_document
+---
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(stringr)
+library(ggplot2)
+library(directlabels)
+library(purrr)
+library(scales)
+```
+
+
+```{r}
+# Clear data
+rm(list=ls())
+
+# Load data
+df = read.delim2("HHI.csv", sep = ",")
+```
+
+```{r}
+# Drop duplicates
+df$id = paste(df$gvkey, df$fyear)
+df = df[!duplicated(df$id),]
+
+# Fix classes
+df$revt = as.numeric(as.character(df$revt))
+
+# Drop observations with no revenues or negative revenues
+df$revt = ifelse(df$revt <0, NA, df$revt)
+df = drop_na(df, revt)
+
+# Break down SIC codes
+df$sic4 = df$sic
+df$sic3 = substr(df$sic4, start = 1, stop = 3)
+df$sic2 = substr(df$sic4, start = 1, stop = 2)
+df$sic1 = substr(df$sic4, start = 1, stop = 1)
+
+# Total industry sales each year
+indrev = df %>% group_by(fyear, sic3) %>% summarise(indrev = sum(revt, na.rm = T))
+
+# Market shares of each firm each year
+df2 = left_join(df, indrev, by = c("fyear", "sic3"))
+df2$mktsh = df2$revt / df2$indrev * 100
+df2$mktshsq = df2$mktsh ^2 # square the market share of each
+
+# Industry HHI each year
+hhi = df2 %>% group_by(fyear, sic3) %>% summarise(hhi = sum(mktshsq))
+
+# Too few industries each year?
+length(unique(hhi$sic3))
+table(hhi$fyear)
+
+# Rename year variable
+hhi = rename(hhi, year = fyear)
+indrev = rename(indrev, year = fyear)
+
+# Extract final CRSP dataframe
+write.csv(hhi, "ind_HHI.csv", row.names = F)
+write.csv(indrev, "ind_rev.csv", row.names = F)
+```

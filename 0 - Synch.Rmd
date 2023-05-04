@@ -1,0 +1,175 @@
+---
+title: "Synch"
+author: "Albert Planting-Gyllenbaga (41669)"
+date: "12/03/2021"
+output: html_document
+---
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(stringr)
+library(ggplot2)
+library(directlabels)
+library(purrr)
+library(scales)
+library(Hmisc)
+library(fBasics)
+```
+
+```{r}
+# Clear data
+rm(list=ls())
+
+# Load data
+df = read.delim2("synch_data.csv", sep = ",")
+mkt = read.delim2("index_data.csv", sep = ",")
+
+# Join datasets
+mkt = rename(mkt, date = DATE)
+```
+
+Fix and create variables
+```{r}
+# Fix price observations
+df$PRC = as.character(df$PRC)
+df$PRC = str_remove_all(df$PRC, "-")
+df$PRC = as.numeric(df$PRC)
+
+# Fix returns
+df$RETX = as.numeric(as.character(df$RETX))
+
+# Break down SIC codes
+df$sic3 = substr(df$SICCD, start = 1, stop = 3)
+df$sic2 = substr(df$SICCD, start = 1, stop = 2)
+df$sic1 = substr(df$SICCD, start = 1, stop = 1)
+
+# Create market cap
+df$mcap = df$SHROUT * df$PRC
+
+# Drop finance, nonclassifiable industries and industry NAs
+df = subset(df, sic1 != "6")
+df = subset(df, sic2 != "99")
+df = subset(df, sic3 != "Z")
+df = subset(df, sic3 != "0")
+df = subset(df, sic3 != "")
+df = subset(df, !is.na(sic3))
+```
+
+
+Create value-weighted industry returns
+```{r}
+# Create daily VW returns
+vwind = df %>% group_by(date, sic2) %>%
+  summarise(VWIND = sum(RETX * mcap, na.rm = T)/sum(mcap, na.rm = T))
+
+# Pivot industry rows to columns
+x = pivot_wider(data=vwind, names_from = "sic2", values_from = "VWIND")
+
+# Rename columns
+colnames(x)[2:ncol(x)] = paste("sic",colnames(x)[2:ncol(x)],sep="_")
+vwind = x
+rm(x)
+```
+
+
+Create dataset
+```{r}
+# Select columns
+df2 = df %>% select(PERMNO, PERMCO, date, sic2, RETX)
+
+# Explode dates
+df2$year = as.numeric(substr(df2$date, start = 1, stop = 4))
+mkt$year = as.numeric(substr(mkt$date, start = 1, stop = 4))
+vwind$year = as.numeric(substr(vwind$date, start = 1, stop = 4))
+
+# Drop PERMNO-years with NAs in that year
+df2 = df2 %>% group_by(year, PERMNO) %>% mutate(test = sum(RETX))
+df2 = subset(df2, !is.na(test))
+```
+
+
+Run regressions
+```{r}
+# Create parameters
+start = 1975
+end = 2016
+loop = 0
+skip = F
+
+# Create container
+sync = as.data.frame(matrix(ncol = 3, nrow = 1))
+colnames(sync) = c("year", "PERMNO", "nsynch")
+
+# Run regressions
+for (i in start:end) {
+  
+  # Keep track
+  print(i)
+
+  # Subset year
+  x = subset(df2, year == i)
+  y = subset(mkt, year == i)
+  z = subset(vwind, year == i)
+  
+  # Find industries of each firm
+  inds = x[!duplicated(x$PERMNO),]
+  inds = inds %>% ungroup() %>% select(PERMNO, PERMCO, sic2)
+  
+  # Drop firms with fewer than 5 2-sic peers
+  count = inds %>% group_by(sic2) %>% summarise(n = length(PERMCO))
+  count = subset(count, n <=5)
+  count = as.character(count$sic2)
+  x = x[!(x$sic2 %in% count),]
+  inds = inds[!(inds$sic2 %in% count),]
+  permnos = as.numeric(inds$PERMNO)
+  
+  # Adjust dataframes
+  x = x %>% ungroup() %>% select(date, PERMNO, RETX)
+  x = x %>% pivot_wider(names_from = "PERMNO", values_from = "RETX")
+  y = y[c("date", "vwretx")]
+  y$vwretx = as.numeric(as.character(y$vwretx))
+  z = z %>% select(-year)
+  
+  # Merge dataframes
+  x = left_join(x, y, by = "date")
+  x = left_join(x, z, by = "date")
+  
+  
+  
+  for (j in permnos) {
+    
+    # Loop
+    loop = loop + 1
+    
+    # Create dataframe for regression
+    ind = as.character(subset(inds, PERMNO == j)["sic2"])
+    vars = x[c(as.character(j), "vwretx", paste("sic", ind, sep = "_"))]
+    colnames(vars) = c("ret", "mkt", "ind")
+    
+    # Run regression
+    mod = tryCatch(lm(ret ~ mkt + ind, data = vars),
+                   error = function(e) {skip <<- T})
+    if(skip){next}
+    
+    # Save results
+    r = 1 - summary(mod)$r.squared
+    sync[loop, 1] = i
+    sync[loop, 2] = j
+    sync[loop, 3] = r
+  }
+}
+
+
+# Match permno to permco
+match = df2 %>% select(year, PERMNO, PERMCO)
+match = match %>% group_by(year, PERMNO) %>% summarise(PERMCO = max(PERMCO))
+sync$id = paste(sync$year, sync$PERMNO)
+match$id = paste(match$year, match$PERMNO)
+match = match[match$id %in% sync$id,]
+sync = left_join(sync, select(match, -id), by = c("year", "PERMNO"))
+
+# Export dataset
+write.csv(sync, "nsynch.csv", row.names = F)
+```

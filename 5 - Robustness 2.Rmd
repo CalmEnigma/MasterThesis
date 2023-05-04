@@ -1,0 +1,1298 @@
+---
+title: "5 - FERC robustness"
+author: "Albert Planting-Gyllenbaga (41669)"
+date: "26/04/2021"
+output: html_document
+---
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(stringr)
+library(ggplot2)
+library(directlabels)
+library(purrr)
+library(fBasics)
+library(Hmisc)
+library(plm)
+library(stargazer)
+library(lmtest)
+library(sandwich)
+library(car)
+library(scales)
+library(DescTools)
+library(ggrepel)
+```
+
+
+Load and adjust data
+```{r}
+# Clear data
+rm(list=ls())
+
+# Load data
+df = read.delim2("dataset_interacted.csv", sep = ",")
+sync = read.delim2("nsynch.csv", sep = ",")
+
+# Adjust classes
+x = colnames(df)
+x = x[!(x %in% c("COMNAM"))]
+
+for (i in x) {
+  df[[i]] = as.numeric(as.character(df[[i]]))
+}
+
+x = c("year", "PERMCO", "GVKEY", "sic4", "sic3", "sic2", "sic1", "naics4")
+
+for (i in x) {
+  df[[i]] = factor(df[[i]])
+}
+
+# Adjust sync
+sync$nsynch = as.numeric(as.character(sync$nsynch))
+sync$year = factor(sync$year)
+sync$PERMCO = factor(sync$PERMCO)
+sync$id = paste(sync$year, sync$PERMCO)
+sync = sync[!duplicated(sync$id),]
+
+# Rename NEST and size
+colnames(df) = gsub("NEST", "nest", colnames(df))
+colnames(df) = gsub("S", "Sz", colnames(df))
+
+# Merge in sync
+df = left_join(df, sync[c("year", "PERMCO", "nsynch")], by = c("year", "PERMCO"))
+```
+
+
+Basic stats of robustnesses
+```{r}
+# Create summary stats
+x = df %>% select(lc4, lc_naics, EBIT_l, EBIT_t, EBIT3, EBITDA4, R4,
+                  nsynch)
+stats = basicStats(x)
+stats = round(stats, 2)
+stats <- stats[c("Minimum", "1. Quartile","Median", "3. Quartile",
+                 "Maximum", "Mean", "Stdev"),]
+stats = t(stats)
+
+# Rename to latex
+colnames(stats) = c("Min", "25\\textsuperscript{th}", "Median", "75\\textsuperscript{th}",
+                    "Max", "Mean", "SD")
+rownames(stats) = c("4-digit SIC $LC_{t}$", "NAICS $LC_{t}$",
+                    "$EBIT_{t-1}$", "$EBIT_{t}$", "$EBIT3_{t}$",
+                    "$E4_{t}$", "$R4_{t}$", "$NSYNCH_{t}$")
+
+# Summary stats table
+stargazer(stats, type = "latex")
+```
+
+
+
+Create FERC function
+```{r}
+# Drop other variables that should not be included in the basic formula
+exc = c("r0", "PERMCO", "GVKEY", "sic4", "sic3", "sic2", "sic1", "tlist3", "tlist4",
+      "year", "fyr", "hhi", "naics", "tlist3l")
+exc = colnames(df)[!(colnames(df) %in% exc)]
+all = exc
+exc = exc[!grepl("xrd", exc)]
+#exc = exc[!grepl("int", exc)]
+exc = exc[!grepl("div", exc)]
+exc = exc[!grepl("indto", exc)]
+exc = exc[!grepl("naics", exc)]
+exc = exc[!grepl("R4", exc)]
+exc = exc[!grepl("EBITDA4", exc)]
+exc = exc[!grepl("EBIT_", exc)]
+exc = exc[!grepl("EBIT3", exc)]
+exc = exc[!grepl("lc4", exc)]
+exc = exc[!grepl("nsynch", exc)]
+exc = exc[!grepl("lc3l", exc)]
+
+# Add interacted dummies
+exc2 = c(exc, "sic1", "sic1:EBITDA_l", "sic1:EBITDA_t", "sic1:EBITDA3", "sic1:R3",
+         "year", "year:EBITDA_l", "year:EBITDA_t", "year:EBITDA3", "year:R3")
+
+# Create formula for full model with all controls
+f <- as.formula(paste("r0 ~", paste(exc, collapse = " + ")))
+f
+
+# Drop mediators
+exc = exc[!grepl("nest", exc)]
+exc = exc[!grepl("to", exc)]
+
+# Add interacted dummies
+exc1 = c(exc, "sic1", "sic1:EBITDA_l", "sic1:EBITDA_t", "sic1:EBITDA3", "sic1:R3",
+         "year", "year:EBITDA_l", "year:EBITDA_t", "year:EBITDA3", "year:R3")
+
+# Create formula with no controls
+exc0 = c("EBITDA_l", "EBITDA_t", "EBITDA3", "R3", "lc3", "lc3_EBITDA_l",
+         "lc3_EBITDA_t", "lc3_EBITDA3", "lc3_R3")
+
+
+# Create labels
+ctrl = c('Controls', "No", "Yes", "Yes", "Yes", "Yes", "Yes", "Yes")
+media = c('Mediators', "No", "No", "Yes", "No", "No", "No", "No")
+inds = c('Industry dummies', "No", "Yes", "Yes", "Yes", "Yes", "Yes", "Yes")
+fe = c('Year fixed effects', "No", "Yes", "Yes", "Yes", "Yes", "Yes", "Yes")
+se = c('Adjusted SE', "Yes", "Yes", "Yes", "Yes", "Yes", "Yes", "Yes")
+```
+
+
+Robustness: include mediator variables
+```{r}
+# Create containers
+mods_med = list()
+obs = as.data.frame(matrix(nrow = 2, ncol = 3))
+
+# Run basic model
+f <- as.formula(paste("r0 ~", paste(exc1, collapse = " + ")))
+n = 1
+mod = lm(f, data = df)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_med[[n]] = mod
+
+
+# Create formula with analyst estimates
+x = c(exc1, all[grepl("nest", all)])
+x = x[!grepl("EBIT_", x)]
+x = x[!grepl("EBIT3", x)]
+x = x[!grepl("EBITDA4", x)]
+x = x[!grepl("R4", x)]
+f <- as.formula(paste("r0 ~", paste(x, collapse = " + ")))
+
+# Reposition mediator vars to the end of the dataset
+x = df[grepl("to", colnames(df))]
+df = df[!grepl("to", colnames(df))]
+df = cbind(df, x)
+
+x = df[grepl("nest", colnames(df))]
+df = df[!grepl("nest", colnames(df))]
+df = cbind(df, x)
+
+
+# Run analyst estimates model
+n = n+1
+mod = lm(f, data = df)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_med[[n]] = mod
+
+
+
+# Create formula with turnover
+x = c(exc1, all[grepl("to", all)])
+x = x[!grepl("indto", x)]
+x = x[!grepl("EBIT_", x)]
+x = x[!grepl("EBIT3", x)]
+x = x[!grepl("EBITDA4", x)]
+x = x[!grepl("R4", x)]
+f <- as.formula(paste("r0 ~", paste(x, collapse = " + ")))
+
+# Run turnover model
+n = n+1
+mod = lm(f, data = df)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_med[[n]] = mod
+
+
+
+# Create formula with both
+x = c(exc1, all[grepl("nest", all)])
+x = c(x, all[grepl("to", all)])
+x = x[!grepl("indto", x)]
+x = x[!grepl("EBIT_", x)]
+x = x[!grepl("EBIT3", x)]
+x = x[!grepl("EBITDA4", x)]
+x = x[!grepl("R4", x)]
+f <- as.formula(paste("r0 ~", paste(x, collapse = " + ")))
+
+# Run model with both mediators
+n = n+1
+mod = lm(f, data = df)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_med[[n]] = mod
+
+
+# Create table
+n = as.numeric(unlist(obs[1,]))
+r2 = as.numeric(unlist(obs[2,]))
+r2 = format(round(r2, digits=2), nsmall = 2) 
+
+rep = 10
+stargazer(mods_med,
+          type="latex",
+          omit = c("Cons", "_W__", "sic", "Sz", "prc_xrd", "age", "MB", "L", "hhi",
+                   "19", "20", "int"),
+          model.names = F,
+          dep.var.labels.include = F,
+          dep.var.caption = "",
+          omit.stat=c("f", "ser", "rsq"),
+          covariate.labels = c("$E_{t-1}$", "$E_{t}$", "$E3_{t}$", "$R3_{t}$",
+                                "$LC_{t}$", "$LC_{t}*E_{t-1}$", "$LC_{t}*E_{t}$",
+                                "$LC_{t}*E3_{t}$", "$LC_{t}*R3_{t}$",
+                                "$NEST_{t}$", "$NEST_{t}*E_{t-1}$", "$NEST_{t}*E_{t}$",
+                                "$NEST_{t}*E3_{t}$", "$NEST_{t}*R3_{t}$",
+                                "$TO_{t}$", "$TO_{t}*E_{t-1}$", "$TO_{t}*E_{t}$",
+                                "$TO_{t}*E3_{t}$", "$TO_{t}*R3_{t}$"),
+          add.lines=list(#c('Size controls', rep("Yes",rep)),
+                         #c('HHI controls', rep("Yes", rep)),
+                         #c('M/B ratio controls', rep("Yes", rep)),
+                         c('Controls', rep("Yes", rep)),
+                         c('Industry dummies', rep("Yes", rep)),
+                         c('Year fixed effects', rep("Yes", rep)),
+                         c('Adjusted SE', rep("Yes", rep)),
+                         c("Observations", n),
+                         c("Adjusted R2", r2)))
+```
+
+
+Robustness: change to lagged industry classifications
+```{r}
+# Create formula with 4-digit listings
+x = gsub("lc3", "lc3l", exc1)
+f <- as.formula(paste("r0 ~", paste(x, collapse = " + ")))
+
+# Create formula with mediators
+x = gsub("lc3", "lc3l", exc2)
+f2 <- as.formula(paste("r0 ~", paste(x, collapse = " + ")))
+
+# Create base formula with 4-digit listings
+x = gsub("lc3", "lc3l", exc0)
+f0 <- as.formula(paste("r0 ~", paste(x, collapse = " + ")))
+
+# Create containers
+mods_lc3l = list()
+obs = as.data.frame(matrix(nrow = 2, ncol = 3))
+
+# Run 4-digit base model
+n = 1
+mod = lm(f0, data = df)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_lc3l[[n]] = mod
+
+# Run 4-digit model
+n = n+1
+mod = lm(f, data = df)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_lc3l[[n]] = mod
+
+# Run mediator model
+n = n+1
+mod = lm(f2, data = df)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_lc3l[[n]] = mod
+
+
+# Run 2011
+z = subset(df, as.numeric(as.character(year)) >2010)
+n = n+1
+mod = lm(f, data = z)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_lc3l[[n]] = mod
+
+# Run high MB
+z = z %>% mutate(rank_MB = percent_rank(MB))
+a = subset(z, rank_MB >0.75)
+n = n+1
+mod = lm(f, data = a)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_lc3l[[n]] = mod
+
+# Run high int
+z = z %>% mutate(rank_int = percent_rank(prc_int))
+a = subset(z, rank_int >0.75)
+n = n+1
+mod = lm(f, data = a)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_lc3l[[n]] = mod
+
+# Create table
+n = as.numeric(unlist(obs[1,]))
+r2 = as.numeric(unlist(obs[2,]))
+r2 = format(round(r2, digits=2), nsmall = 2) 
+
+rep = 10
+stargazer(mods_lc3l,
+          type="latex",
+          omit = c("Cons", "_W_", "sic", "Sz", "prc_xrd", "age", "MB", "L", "hhi",
+                   "19", "20", "int", "nest", "to"),
+          model.names = F,
+          dep.var.labels.include = F,
+          dep.var.caption = "",
+          omit.stat=c("f", "ser", "rsq"),
+          covariate.labels = c("$E_{t-1}$", "$E_{t}$", "$E3_{t}$", "$R3_{t}$",
+                                 "$LC_{t-1}$",
+                                 "$LC_{t-1}*E_{t-1}$",
+                                 "$LC_{t-1}*E_{t}$",
+                                 "$LC_{t-1}*E3_{t}$",
+                                 "$LC_{t-1}*R3_{t}$"),
+          add.lines=list(#c('Size controls', "No", "Yes"),
+                         #c('HHI controls', "No", "Yes"),
+                         #c('M/B ratio controls', "No", "Yes"),
+                         ctrl,
+                         media,
+                         inds,
+                         fe,
+                         se,
+                         c("Observations", n),
+                         c("Adjusted R2", r2)))
+```
+
+
+
+Robustness: change to 4- digit industry classifications
+```{r}
+# Create formula with 4-digit listings
+x = gsub("lc3", "lc4", exc1)
+f <- as.formula(paste("r0 ~", paste(x, collapse = " + ")))
+
+# Create formula with mediators
+x = gsub("lc3", "lc4", exc2)
+f2 <- as.formula(paste("r0 ~", paste(x, collapse = " + ")))
+
+# Create base formula with 4-digit listings
+x = gsub("lc3", "lc4", exc0)
+f0 <- as.formula(paste("r0 ~", paste(x, collapse = " + ")))
+
+# Create containers
+mods_sic4 = list()
+obs = as.data.frame(matrix(nrow = 2, ncol = 3))
+
+# Run 4-digit base model
+n = 1
+mod = lm(f0, data = df)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic4"))
+mods_sic4[[n]] = mod
+
+# Run 4-digit model
+n = n+1
+mod = lm(f, data = df)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic4"))
+mods_sic4[[n]] = mod
+
+# Run mediator model
+n = n+1
+mod = lm(f2, data = df)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic4"))
+mods_sic4[[n]] = mod
+
+# Run 2011
+z = subset(df, as.numeric(as.character(year)) >2010)
+n = n+1
+mod = lm(f, data = z)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic4"))
+mods_sic4[[n]] = mod
+
+# Run high MB
+z = z %>% mutate(rank_MB = percent_rank(MB))
+a = subset(z, rank_MB >0.75)
+n = n+1
+mod = lm(f, data = a)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic4"))
+mods_sic4[[n]] = mod
+
+# Run high int
+z = z %>% mutate(rank_int = percent_rank(prc_int))
+a = subset(z, rank_int >0.75)
+n = n+1
+mod = lm(f, data = a)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic4"))
+mods_sic4[[n]] = mod
+
+# Create table
+n = as.numeric(unlist(obs[1,]))
+r2 = as.numeric(unlist(obs[2,]))
+r2 = format(round(r2, digits=2), nsmall = 2) 
+
+rep = 10
+stargazer(mods_sic4,
+          type="latex",
+          omit = c("Cons", "_W_", "sic", "Sz", "prc_xrd", "age", "MB", "L", "hhi",
+                   "19", "20", "int", "nest", "to"),
+          model.names = F,
+          dep.var.labels.include = F,
+          dep.var.caption = "",
+          omit.stat=c("f", "ser", "rsq"),
+          covariate.labels = c("$E_{t-1}$", "$E_{t}$", "$E3_{t}$", "$R3_{t}$",
+                                 "4-digit SIC $LC_{t}$",
+                                 "4-digit SIC $LC_{t}*E_{t-1}$",
+                                 "4-digit SIC $LC_{t}*E_{t}$",
+                                 "4-digit SIC $LC_{t}*E3_{t}$",
+                                 "4-digit SIC $LC_{t}*R3_{t}$"),
+          add.lines=list(#c('Size controls', "No", "Yes"),
+                         #c('HHI controls', "No", "Yes"),
+                         #c('M/B ratio controls', "No", "Yes"),
+                         ctrl,
+                         media,
+                         inds,
+                         fe,
+                         se,
+                         c("Observations", n),
+                         c("Adjusted R2", r2)))
+```
+
+
+
+Robustness: change to NAICS industry classifications
+```{r}
+# Create formula
+x = gsub("lc3_", "lcnaics_", exc1)
+x = gsub("lc3", "lc_naics", x)
+f <- as.formula(paste("r0 ~", paste(x, collapse = " + ")))
+
+# Create formula with mediators
+x = gsub("lc3_", "lcnaics_", exc2)
+x = gsub("lc3", "lc_naics", x)
+f2 <- as.formula(paste("r0 ~", paste(x, collapse = " + ")))
+
+# Create base formula
+x = gsub("lc3_", "lcnaics_", exc0)
+x = gsub("lc3", "lc_naics", x)
+f0 <- as.formula(paste("r0 ~", paste(x, collapse = " + ")))
+
+# Create containers
+mods_naics = list()
+obs = as.data.frame(matrix(nrow = 2, ncol = 3))
+
+# Run base model
+n = 1
+mod = lm(f0, data = df)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "naics4"))
+mods_naics[[n]] = mod
+
+# Run model
+n = n+1
+mod = lm(f, data = df)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "naics4"))
+mods_naics[[n]] = mod
+
+# Run mediator model
+n = n+1
+mod = lm(f2, data = df)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "naics4"))
+mods_naics[[n]] = mod
+
+# Run 2011
+z = subset(df, as.numeric(as.character(year)) >2010)
+n = n+1
+mod = lm(f, data = z)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "naics4"))
+mods_naics[[n]] = mod
+
+# Run high MB
+z = z %>% mutate(rank_MB = percent_rank(MB))
+a = subset(z, rank_MB >0.75)
+n = n+1
+mod = lm(f, data = a)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "naics4"))
+mods_naics[[n]] = mod
+
+# Run high int
+z = z %>% mutate(rank_int = percent_rank(prc_int))
+a = subset(z, rank_int >0.75)
+n = n+1
+mod = lm(f, data = a)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "naics4"))
+mods_naics[[n]] = mod
+
+# Create table
+n = as.numeric(unlist(obs[1,]))
+r2 = as.numeric(unlist(obs[2,]))
+r2 = format(round(r2, digits=2), nsmall = 2) 
+
+rep = 10
+stargazer(mods_naics,
+          type="latex",
+          omit = c("Cons", "_W_", "sic", "Sz", "prc_xrd", "age", "MB", "L", "hhi",
+                   "19", "20", "int", "nest", "to"),
+          model.names = F,
+          dep.var.labels.include = F,
+          dep.var.caption = "",
+          omit.stat=c("f", "ser", "rsq"),
+          covariate.labels = c("$E_{t-1}$", "$E_{t}$", "$E3_{t}$", "$R3_{t}$",
+                                 "NAICS $LC_{t}$",
+                                 "NAICS $LC_{t}*E_{t-1}$",
+                                 "NAICS $LC_{t}*E_{t}$",
+                                 "NAICS $LC_{t}*E3_{t}$",
+                                 "NAICS $LC_{t}*R3_{t}$"),
+          add.lines=list(#c('Size controls', "No", "Yes"),
+                         #c('HHI controls', "No", "Yes"),
+                         #c('M/B ratio controls', "No", "Yes"),
+                         ctrl,
+                         media,
+                         inds,
+                         fe,
+                         se,
+                         c("Observations", n),
+                         c("Adjusted R2", r2)))
+```
+
+
+
+
+Robustness: new IPOs
+```{r}
+# Drop 
+y = subset(df, age > 1)
+
+# Create formulas
+f <- as.formula(paste("r0 ~", paste(exc1, collapse = " + ")))
+f2 <- as.formula(paste("r0 ~", paste(exc2, collapse = " + ")))
+f0 <- as.formula(paste("r0 ~", paste(exc0, collapse = " + ")))
+
+# Create containers
+mods_old = list()
+obs = as.data.frame(matrix(nrow = 2, ncol = 3))
+
+# Run base model
+n = 1
+mod = lm(f0, data = y)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_old[[n]] = mod
+
+# Run model
+n = n+1
+mod = lm(f, data = y)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_old[[n]] = mod
+
+# Run mediator model
+n = n+1
+mod = lm(f2, data = y)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_old[[n]] = mod
+
+# Run 2011
+z = subset(y, as.numeric(as.character(year)) >2010)
+n = n+1
+mod = lm(f, data = z)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_old[[n]] = mod
+
+# Run high MB
+z = z %>% mutate(rank_MB = percent_rank(MB))
+a = subset(z, rank_MB >0.75)
+n = n+1
+mod = lm(f, data = a)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_old[[n]] = mod
+
+# Run high int
+z = z %>% mutate(rank_int = percent_rank(prc_int))
+a = subset(z, rank_int >0.75)
+n = n+1
+mod = lm(f, data = a)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_old[[n]] = mod
+
+# Create table
+n = as.numeric(unlist(obs[1,]))
+r2 = as.numeric(unlist(obs[2,]))
+r2 = format(round(r2, digits=2), nsmall = 2) 
+
+rep = 10
+stargazer(mods_old,
+          type="latex",
+          omit = c("Cons", "_W_", "sic", "Sz", "prc_xrd", "age", "MB", "L", "hhi",
+                   "19", "20", "int", "nest", "to"),
+          model.names = F,
+          dep.var.labels.include = F,
+          dep.var.caption = "",
+          omit.stat=c("f", "ser", "rsq"),
+          covariate.labels = c("$E_{t-1}$", "$E_{t}$", "$E3_{t}$", "$R3_{t}$",
+                                 "$LC_{t}$",
+                                 "$LC_{t}*E_{t-1}$",
+                                 "$LC_{t}*E_{t}$",
+                                 "$LC_{t}*E3_{t}$",
+                                 "$LC_{t}*R3_{t}$"),
+          add.lines=list(#c('Size controls', "No", "Yes"),
+                         #c('HHI controls', "No", "Yes"),
+                         #c('M/B ratio controls', "No", "Yes"),
+                         ctrl,
+                         media,
+                         inds,
+                         fe,
+                         se,
+                         c("Observations", n),
+                         c("Adjusted R2", r2)))
+
+```
+
+
+
+
+
+
+
+Robustness: exclude utilities
+```{r}
+# Drop utilities
+y = subset(df, sic1 != "4")
+
+# Create formulas
+f <- as.formula(paste("r0 ~", paste(exc1, collapse = " + ")))
+f2 <- as.formula(paste("r0 ~", paste(exc2, collapse = " + ")))
+f0 <- as.formula(paste("r0 ~", paste(exc0, collapse = " + ")))
+
+# Create containers
+mods_ut = list()
+obs = as.data.frame(matrix(nrow = 2, ncol = 3))
+
+# Run base model
+n = 1
+mod = lm(f0, data = y)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_ut[[n]] = mod
+
+# Run model
+n = n+1
+mod = lm(f, data = y)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_ut[[n]] = mod
+
+# Run mediator model
+n = n+1
+mod = lm(f2, data = y)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_ut[[n]] = mod
+
+
+# Run 2011
+z = subset(y, as.numeric(as.character(year)) >2010)
+n = n+1
+mod = lm(f, data = z)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_ut[[n]] = mod
+
+# Run high MB
+z = z %>% mutate(rank_MB = percent_rank(MB))
+a = subset(z, rank_MB >0.75)
+n = n+1
+mod = lm(f, data = a)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_ut[[n]] = mod
+
+# Run high int
+z = z %>% mutate(rank_int = percent_rank(prc_int))
+a = subset(z, rank_int >0.75)
+n = n+1
+mod = lm(f, data = a)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_ut[[n]] = mod
+
+# Create table
+n = as.numeric(unlist(obs[1,]))
+r2 = as.numeric(unlist(obs[2,]))
+r2 = format(round(r2, digits=2), nsmall = 2) 
+
+rep = 10
+stargazer(mods_ut,
+          type="latex",
+          omit = c("Cons", "_W_", "sic", "Sz", "prc_xrd", "age", "MB", "L", "hhi",
+                   "19", "20", "int", "nest", "to"),
+          model.names = F,
+          dep.var.labels.include = F,
+          dep.var.caption = "",
+          omit.stat=c("f", "ser", "rsq"),
+          covariate.labels = c("$E_{t-1}$", "$E_{t}$", "$E3_{t}$", "$R3_{t}$",
+                                 "$LC_{t}$",
+                                 "$LC_{t}*E_{t-1}$",
+                                 "$LC_{t}*E_{t}$",
+                                 "$LC_{t}*E3_{t}$",
+                                 "$LC_{t}*R3_{t}$"),
+          add.lines=list(#c('Size controls', "No", "Yes"),
+                         #c('HHI controls', "No", "Yes"),
+                         #c('M/B ratio controls', "No", "Yes"),
+                         ctrl,
+                         media,
+                         inds,
+                         fe,
+                         se,
+                         c("Observations", n),
+                         c("Adjusted R2", r2)))
+
+```
+
+
+Robustness: fiscal year ends 31 dec
+```{r}
+# Drop other year ends
+y = subset(df, fyr == 12)
+
+# Create formulas
+f <- as.formula(paste("r0 ~", paste(exc1, collapse = " + ")))
+f2 <- as.formula(paste("r0 ~", paste(exc2, collapse = " + ")))
+f0 <- as.formula(paste("r0 ~", paste(exc0, collapse = " + ")))
+
+# Create containers
+mods_fy = list()
+obs = as.data.frame(matrix(nrow = 2, ncol = 3))
+
+# Run base model
+n = 1
+mod = lm(f0, data = y)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_fy[[n]] = mod
+
+# Run model
+n = n+1
+mod = lm(f, data = y)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_fy[[n]] = mod
+
+# Run mediator model
+n = n+1
+mod = lm(f2, data = y)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_fy[[n]] = mod
+
+# Run 2011
+z = subset(y, as.numeric(as.character(year)) >2010)
+n = n+1
+mod = lm(f, data = z)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_fy[[n]] = mod
+
+# Run high MB
+z = z %>% mutate(rank_MB = percent_rank(MB))
+a = subset(z, rank_MB >0.75)
+n = n+1
+mod = lm(f, data = a)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_fy[[n]] = mod
+
+# Run high int
+z = z %>% mutate(rank_int = percent_rank(prc_int))
+a = subset(z, rank_int >0.75)
+n = n+1
+mod = lm(f, data = a)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_fy[[n]] = mod
+
+# Create table
+n = as.numeric(unlist(obs[1,]))
+r2 = as.numeric(unlist(obs[2,]))
+r2 = format(round(r2, digits=2), nsmall = 2) 
+
+rep = 10
+stargazer(mods_fy,
+          type="latex",
+          omit = c("Cons", "_W_", "sic", "Sz", "prc_xrd", "age", "MB", "L", "hhi",
+                   "19", "20", "int", "nest", "to"),
+          model.names = F,
+          dep.var.labels.include = F,
+          dep.var.caption = "",
+          omit.stat=c("f", "ser", "rsq"),
+          covariate.labels = c("$E_{t-1}$", "$E_{t}$", "$E3_{t}$", "$R3_{t}$",
+                                 "$LC_{t}$",
+                                 "$LC_{t}*E_{t-1}$",
+                                 "$LC_{t}*E_{t}$",
+                                 "$LC_{t}*E3_{t}$",
+                                 "$LC_{t}*R3_{t}$"),
+          add.lines=list(#c('Size controls', "No", "Yes"),
+                         #c('HHI controls', "No", "Yes"),
+                         #c('M/B ratio controls', "No", "Yes"),
+                         ctrl,
+                         media,
+                         inds,
+                         fe,
+                         se,
+                         c("Observations", n),
+                         c("Adjusted R2", r2)))
+
+```
+
+
+
+
+Robustness: change to EBIT
+```{r}
+# Create formula 
+x = gsub("EBITDA", "EBIT", exc1)
+f <- as.formula(paste("r0 ~", paste(x, collapse = " + ")))
+
+# Create formula with mediators
+x = gsub("EBITDA", "EBIT", exc2)
+f2 <- as.formula(paste("r0 ~", paste(x, collapse = " + ")))
+
+# Create base formula
+x = gsub("EBITDA", "EBIT", exc0)
+f0 <- as.formula(paste("r0 ~", paste(x, collapse = " + ")))
+
+# Create containers
+mods_ebit = list()
+obs = as.data.frame(matrix(nrow = 2, ncol = 3))
+
+# Run base model
+n = 1
+mod = lm(f0, data = df)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_ebit[[n]] = mod
+
+# Run model
+n = n+1
+mod = lm(f, data = df)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_ebit[[n]] = mod
+
+# Run mediator model
+n = n+1
+mod = lm(f2, data = df)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_ebit[[n]] = mod
+
+# Run 2011
+z = subset(df, as.numeric(as.character(year)) >2010)
+n = n+1
+mod = lm(f, data = z)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_ebit[[n]] = mod
+
+# Run high MB
+z = z %>% mutate(rank_MB = percent_rank(MB))
+a = subset(z, rank_MB >0.75)
+n = n+1
+mod = lm(f, data = a)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_ebit[[n]] = mod
+
+# Run high int
+z = z %>% mutate(rank_int = percent_rank(prc_int))
+a = subset(z, rank_int >0.75)
+n = n+1
+mod = lm(f, data = a)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_ebit[[n]] = mod
+
+# Create table
+n = as.numeric(unlist(obs[1,]))
+r2 = as.numeric(unlist(obs[2,]))
+r2 = format(round(r2, digits=2), nsmall = 2) 
+
+rep = 10
+stargazer(mods_ebit,
+          type="latex",
+          omit = c("Cons", "_W_", "sic", "Sz", "prc_xrd", "age", "MB", "L", "hhi",
+                   "19", "20", "int", "nest", "to"),
+          model.names = F,
+          dep.var.labels.include = F,
+          dep.var.caption = "",
+          omit.stat=c("f", "ser", "rsq"),
+          covariate.labels = c("$EBIT_{t-1}$", "$EBIT_{t}$", "$EBIT3_{t}$", "$R3_{t}$",
+                                 "$LC_{t}$",
+                                 "$LC_{t}*EBIT_{t-1}$",
+                                 "$LC_{t}*EBIT_{t}$",
+                                 "$LC_{t}*EBIT3_{t}$",
+                                 "$LC_{t}*R3_{t}$"),
+          add.lines=list(#c('Size controls', "No", "Yes"),
+                         #c('HHI controls', "No", "Yes"),
+                         #c('M/B ratio controls', "No", "Yes"),
+                         ctrl,
+                         media,
+                         inds,
+                         fe,
+                         se,
+                         c("Observations", n),
+                         c("Adjusted R2", r2)))
+```
+
+
+
+Robustness: change to 4 future returns/earnings
+```{r}
+# Create formula 
+x = gsub("EBITDA3", "EBITDA4", exc1)
+x = gsub("R3", "R4", x)
+f <- as.formula(paste("r0 ~", paste(x, collapse = " + ")))
+
+# Create formula with mediators
+x = gsub("EBITDA3", "EBITDA4", exc2)
+x = gsub("R3", "R4", x)
+f2 <- as.formula(paste("r0 ~", paste(x, collapse = " + ")))
+
+# Create base formula
+x = gsub("EBITDA3", "EBITDA4", exc0)
+x = gsub("R3", "R4", x)
+f0 <- as.formula(paste("r0 ~", paste(x, collapse = " + ")))
+
+# Create containers
+mods_4l = list()
+obs = as.data.frame(matrix(nrow = 2, ncol = 3))
+
+# Run base model
+n = 1
+mod = lm(f0, data = df)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_4l[[n]] = mod
+
+# Run model
+n = n+1
+mod = lm(f, data = df)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_4l[[n]] = mod
+
+# Run mediator model
+n = n+1
+mod = lm(f2, data = df)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_4l[[n]] = mod
+
+# Run 2011
+z = subset(df, as.numeric(as.character(year)) >2010)
+n = n+1
+mod = lm(f, data = z)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_4l[[n]] = mod
+
+# Run high MB
+z = z %>% mutate(rank_MB = percent_rank(MB))
+a = subset(z, rank_MB >0.75)
+n = n+1
+mod = lm(f, data = a)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_4l[[n]] = mod
+
+# Run high int
+z = z %>% mutate(rank_int = percent_rank(prc_int))
+a = subset(z, rank_int >0.75)
+n = n+1
+mod = lm(f, data = a)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_4l[[n]] = mod
+
+# Create table
+n = as.numeric(unlist(obs[1,]))
+r2 = as.numeric(unlist(obs[2,]))
+r2 = format(round(r2, digits=2), nsmall = 2) 
+
+rep = 10
+stargazer(mods_4l,
+          type="latex",
+          omit = c("Cons", "_W_", "sic", "Sz", "prc_xrd", "age", "MB", "L", "hhi",
+                   "19", "20", "int", "nest", "to"),
+          model.names = F,
+          dep.var.labels.include = F,
+          dep.var.caption = "",
+          omit.stat=c("f", "ser", "rsq"),
+          covariate.labels = c("$E_{t-1}$", "$E_{t}$", "$E4_{t}$", "$R4_{t}$",
+                                 "$LC_{t}$",
+                                 "$LC_{t}*E_{t-1}$",
+                                 "$LC_{t}*E_{t}$",
+                                 "$LC_{t}*E4_{t}$",
+                                 "$LC_{t}*R4_{t}$"),
+          add.lines=list(#c('Size controls', "No", "Yes"),
+                         #c('HHI controls', "No", "Yes"),
+                         #c('M/B ratio controls', "No", "Yes"),
+                         ctrl,
+                         media,
+                         inds,
+                         fe,
+                         se,
+                         c("Observations", n),
+                         c("Adjusted R2", r2)))
+```
+
+
+
+
+
+
+Robustness: Non-synchronicity
+```{r}
+# Create formulas
+f = as.formula("nsynch ~ lc3 + Sz + hhi2 + MB + indMB + prc_int + age +
+           indage + L + sic1 + year")
+f0 = as.formula("nsynch ~ lc3")
+
+# Create containers
+mods_sync = list()
+obs = as.data.frame(matrix(nrow = 2, ncol = 3))
+
+# Run base model
+n = 1
+mod = lm(f0, data = df)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_sync[[n]] = mod
+
+# Run model
+n = n+1
+mod = lm(f, data = df)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_sync[[n]] = mod
+
+
+# Create formula with mediators
+f = as.formula("nsynch ~ lc3 + nest + to + Sz + hhi2 + MB + indMB + prc_int + age +
+           indage + L + sic1 + year")
+
+# Run model
+n = n+1
+mod = lm(f, data = df)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_sync[[n]] = mod
+
+
+# Run 2011
+z = subset(df, as.numeric(as.character(year)) >2010)
+n = n+1
+mod = lm(f, data = z)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_sync[[n]] = mod
+
+# Run high MB
+z = z %>% mutate(rank_MB = percent_rank(MB))
+a = subset(z, rank_MB >0.75)
+n = n+1
+mod = lm(f, data = a)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_sync[[n]] = mod
+
+# Run high int
+z = z %>% mutate(rank_int = percent_rank(prc_int))
+a = subset(z, rank_int >0.75)
+n = n+1
+mod = lm(f, data = a)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_sync[[n]] = mod
+
+# Create table
+n = as.numeric(unlist(obs[1,]))
+r2 = as.numeric(unlist(obs[2,]))
+r2 = format(round(r2, digits=2), nsmall = 2) 
+
+rep = 10
+stargazer(mods_sync,
+          type="latex",
+          omit = c("sic", "19", "20"),
+          model.names = F,
+          #dep.var.labels.include = F,
+          dep.var.caption = "Dependent variable: $NSYNCH_{t}$",
+          omit.stat=c("f", "ser", "rsq", "n", "adj.rsq"),
+          covariate.labels = c("$LC_{t}$", "$NEST_{t}$", "$TO_{t}$",
+                                "$S_{t}$", "$HHI_{t}$", "$M/B_{t}$",
+                                "$IndMB_{t}$", "$Int_{t}$",
+                                "$Age_{t}$", "$IndAge_{t}$",
+                                "$L_{t}$", "Constant"),
+          add.lines=list(inds,
+                         fe,
+                         se,
+                         c("Observations", n),
+                         c("Adjusted R2", r2)))
+
+```
+
+
+
+Robustness: Non-synchronicity - robustnesses
+```{r}
+# Create containers
+mods_sync2 = list()
+obs = as.data.frame(matrix(nrow = 2, ncol = 3))
+
+# Run model with lagged listings
+f = as.formula("nsynch ~ lc3l + nest + to + Sz + hhi2 + MB + indMB + prc_int + age +
+           indage + L + sic1 + year")
+n = 1
+mod = lm(f, data = df)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0"))
+mods_sync2[[n]] = mod
+
+# Run model with 4-digit listings
+f = as.formula("nsynch ~ lc4 + nest + to + Sz + hhi2 + MB + indMB + prc_int + age +
+           indage + L + sic1 + year")
+n = n+1
+mod = lm(f, data = df)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0"))
+mods_sync2[[n]] = mod
+
+# Run model with naics listings
+f = as.formula("nsynch ~ lc_naics + nest + to + Sz + hhi2 + MB + indMB + prc_int + age +
+           indage + L + sic1 + year")
+n = n+1
+mod = lm(f, data = df)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0"))
+mods_sync2[[n]] = mod
+
+# Run model excluding new ipos
+y = subset(df, age > 1)
+f = as.formula("nsynch ~ lc3 + nest + to + Sz + hhi2 + MB + indMB + prc_int + age +
+           indage + L + sic1 + year")
+n = n+1
+mod = lm(f, data = y)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0"))
+mods_sync2[[n]] = mod
+
+# Run model excluding utilities
+y = subset(df, sic1 != "4")
+f = as.formula("nsynch ~ lc3 + nest + to + Sz + hhi2 + MB + indMB + prc_int + age +
+           indage + L + sic1 + year")
+n = n+1
+mod = lm(f, data = y)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0"))
+mods_sync2[[n]] = mod
+
+
+# Run model excluding non 31 dec fiscal years
+y = subset(df, fyr == 12)
+f = as.formula("nsynch ~ lc3 + nest + to + Sz + hhi2 + MB + indMB + prc_int + age +
+           indage + L + sic1 + year")
+n = n+1
+mod = lm(f, data = y)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0"))
+mods_sync2[[n]] = mod
+
+
+# Create table
+n = as.numeric(unlist(obs[1,]))
+r2 = as.numeric(unlist(obs[2,]))
+r2 = format(round(r2, digits=2), nsmall = 2) 
+
+rep = 10
+stargazer(mods_sync2,
+          type="latex",
+          omit = c("sic", "19", "20"),
+          model.names = F,
+          #dep.var.labels.include = F,
+          dep.var.caption = "Dependent variable: $NSYNCH_{t}$",
+          omit.stat=c("f", "ser", "rsq", "n", "adj.rsq"),
+          covariate.labels = c("$LC_{t-1}$", "4-digit SIC $LC_{t}$", "NAICS $LC_{t}$",
+                               "$LC_{t}$", "$NEST_{t}$", "$TO_{t}$",
+                                "$S_{t}$", "$HHI_{t}$", "$M/B_{t}$",
+                                "$IndMB_{t}$", "$Int_{t}$",
+                                "$Age_{t}$", "$IndAge_{t}$",
+                                "$L_{t}$", "Constant"),
+          add.lines=list(c('Industry dummies', "No", "Yes", "Yes", "Yes", "Yes"),
+                         c('Year fixed effects', "No", "Yes", "Yes", "Yes", "Yes"),
+                         c('Adjusted SE', rep("Yes", 10)),
+                         c("Observations", n),
+                         c("Adjusted R2", r2)))
+
+```

@@ -1,0 +1,83 @@
+---
+title: "Coverage"
+author: "Albert Planting-Gyllenbaga (41669)"
+date: "24/04/2021"
+output: html_document
+---
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(stringr)
+library(ggplot2)
+library(directlabels)
+library(purrr)
+library(fBasics)
+library(Hmisc)
+library(DescTools)
+```
+
+
+```{r}
+# Clear data
+rm(list=ls())
+
+# Load data
+lnk = read.delim2("ibes_link.csv", sep = ",")
+df = read.delim2("analrecs.csv", sep = ",")
+```
+
+
+Adjust linking table
+```{r}
+# Remove the more uncertain links
+lnk = subset(lnk, SCORE <= 2)
+lnk = lnk[!duplicated(lnk),]
+
+# Find start and end dates of link
+lnk$start = str_sub(lnk$sdate, start= -4)
+lnk$end = str_sub(lnk$edate, start= -4)
+
+# Select required linking vars
+lnk = lnk[c("TICKER", "PERMNO", "start", "end")]
+lnk = lnk[!duplicated(lnk),]
+
+# Export IBES tickers
+#write.table(unique(lnk$TICKER), "IBES_ticks.txt", quote = F, row.names = F, col.names = F)
+
+# Make a year index
+x = min(lnk$start)
+y = lnk[rep(seq_len(nrow(lnk)), each = 41), ]
+y$year = rep(1976:2016, len = nrow(lnk))
+
+# Drop links not valid for that year
+y$valid = ifelse(y$year >= y$start & y$year < y$end, 1, 0)
+y = subset(y, valid == 1)
+y = y[!duplicated(y),]
+```
+
+
+Adjust IBES data
+```{r}
+df$year = str_sub(df$STATPERS, start=1, end = 4)
+
+# Calculate mean coverage each year
+df2 = df %>% group_by(TICKER, year) %>% summarise(NEST = mean(NUMEST))
+
+# Adjust years
+df2$year = as.numeric(df2$year)
+df2 = subset(df2, year <= 2016)
+```
+
+
+Link IBES to PERMNO
+```{r}
+y = y %>% select(TICKER, PERMNO, year)
+df2 = left_join(df2, y, by = c("year", "TICKER"))
+cov = df2 %>% ungroup() %>% select(year, PERMNO, NEST)
+cov = drop_na(cov)
+
+# Export
+write.csv(cov, "coverage.csv", row.names = F)
+```

@@ -1,0 +1,156 @@
+---
+title: "CCM"
+author: "Albert Planting-Gyllenbaga (41669)"
+date: "12/03/2021"
+output: html_document
+---
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(stringr)
+library(ggplot2)
+library(directlabels)
+library(purrr)
+library(fBasics)
+```
+
+
+```{r}
+# Clear data
+rm(list=ls())
+
+# Load data
+crsp = read.delim2("CRSP2.csv", sep = ",")
+ccm = read.delim2("CCM_fullY.csv", sep = ",")
+```
+
+Adjust and merge CCM
+```{r}
+# Find start and end years of links
+ccm$LS_year = as.numeric(substr(ccm$LINKDT, start = 1, stop = 4))
+ccm$LE_year = as.numeric(substr(ccm$LINKENDDT, start = 1, stop = 4))
+ccm$LE_year = replace_na(ccm$LE_year, 2030)
+
+# Create variable identifying whether the links is valid that year
+ccm$valid = ifelse(ccm$LS_year <= ccm$fyear & ccm$LE_year > ccm$fyear,
+                   1, 0)
+
+# Adjust classes
+x = c("ajex", "ceq", "csho", "dlc", "ebit", "ebitda", "lct", "lt", "ni", "revt",
+      "xrd", "adjex_c", "dvpsx_f", "mkvalt", "prcc_f", "intan", "at", "capx")
+
+for (i in x) {
+  ccm[[i]] = as.numeric(as.character(ccm[[i]]))
+}
+
+# Number of firms that could not be linked
+length(unique(crsp$PERMCO)) - length(unique(ccm$LPERMCO))
+
+# Rename variables
+ccm = rename(ccm, PERMCO = LPERMCO)
+ccm = rename(ccm, year = fyear)
+
+# Firm year ids
+ccm$idyr = paste(ccm$PERMCO, ccm$year)
+
+# Merge the datasets
+#df = left_join(crsp, ccm[c("year", "PERMCO", "GVKEY", "LINKPRIM", "LINKTYPE", "LINKDT")],
+               #by = c("year", "PERMCO"))
+df = left_join(crsp, ccm, by = c("year", "PERMCO"))
+```
+
+
+Remove duplicates in new dataframe
+```{r}
+# Check for duplicates
+df$idyr = paste(df$PERMCO, df$year)
+df$idlong = paste(df$PERMCO, df$year, df$GVKEY, df$LINKPRIM, df$LINKTYPE,
+                  df$LINKDT, df$LE_year)
+
+# Find the duplicates to choose between
+x = df[duplicated(df$idyr),]
+x = subset(df, idyr %in% x$idyr)
+
+# Select to keep primary links and valid links
+x1 = subset(x, LINKPRIM %in% c("P", "C"))
+x1 = subset(x1, valid == "1")
+
+# Of the remaining duplicates select, the one with the most assets
+x1 = x1 %>% group_by(idyr) %>% mutate(new = max(at))
+x1$choose = ifelse(x1$at == x1$new, 1, 0)
+x1 = subset(x1, choose == 1)
+
+# Of the remaining duplicates, select the link with most recent end date
+x1 = x1 %>% group_by(idyr) %>% mutate(new = max(LE_year))
+x1$choose = ifelse(x1$LE_year == x1$new, 1, 0)
+x1 = subset(x1, choose == 1)
+
+# Of the remaining duplicates, select the link with most recent start date
+x1 = x1 %>% group_by(idyr) %>% mutate(new = max(LINKDT))
+x1$choose = ifelse(x1$LINKDT == x1$new, 1, 0)
+x1 = subset(x1, choose == 1)
+
+# Of the remaining duplicates, select the LC connection
+x2 = subset(x1, idyr %in% x1[duplicated(x1$idyr),]$idyr)
+x3 = subset(x2, LINKTYPE == "LC")
+
+# Drop remaining duplicates
+x3 = x3[!duplicated(x3$idyr), ]
+
+# Select duplicates to keep
+x2 = subset(x2, !(idlong %in% x3$idlong)) # x2 now contains the ones to drop
+x1 = subset(x1, !(idlong %in% x2$idlong)) # x1 now contains the ones to keep
+x = x[!(x$idlong %in% x1$idlong),]  # x now contains the ones to drop
+
+# Drop from main df
+dft = subset(df, !(idlong %in% x$idlong))
+
+# Find ones that should not have been dropped
+crsp$idyr = paste(crsp$PERMCO, crsp$year)
+y = crsp[!(crsp$idyr %in% dft$idyr),]
+z = subset(ccm, idyr %in% y$idyr)
+z = z[duplicated(z$idyr),]
+z$idlong = paste(z$PERMCO, z$year, z$GVKEY, z$LINKPRIM, z$LINKTYPE, z$LINKDT, z$LE_year)
+x1 = x[!(x$idlong %in% z$idlong),]$idlong
+
+# Final merged df
+df = subset(df, !(idlong %in% x1))
+df = df[!duplicated(df$idyr),]
+```
+
+
+Add analyst coverage
+```{r}
+cov = read.delim2("coverage.csv", sep = ",")
+cov$NEST = as.numeric(as.character(cov$NEST))
+df = left_join(df, cov, by = (c("year", "PERMNO")))
+```
+
+
+
+Select data
+```{r}
+df2 = df %>% select(year, PERMCO, GVKEY, SHRCD, EXCHCD, NCUSIP, COMNAM, SHRCLS, DLSTCD,
+                    sic4, sic3, sic2, sic1, listed, delist, ipo, ajex, ceq, csho, dlc,
+                    ebit, ebitda, lct, lt, ni, revt, xrd, adjex_c, dvpsx_f, mkvalt,
+                    prcc_f, intan, at, capx, fyr, NEST)
+
+# Export data
+write.csv(df2, "firm_df.csv", row.names = F)
+```
+
+
+
+
+
+
+Scrap
+```{r}
+y = x1[duplicated(x1$idyr),]
+y = subset(x1, idyr %in% y$idyr)
+y = y %>% select(year, PERMCO, GVKEY, idyr, LS_year, LE_year, LINKTYPE, at, ebit)
+
+z = subset(df, PERMCO == "20799")
+```

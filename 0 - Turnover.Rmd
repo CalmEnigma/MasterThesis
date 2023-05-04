@@ -1,0 +1,79 @@
+---
+title: "Turnover"
+author: "Albert Planting-Gyllenbaga (41669)"
+date: "17/03/2021"
+output: html_document
+---
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(stringr)
+library(ggplot2)
+library(directlabels)
+library(purrr)
+library(scales)
+library(Hmisc)
+```
+
+
+```{r}
+# Clear data
+rm(list=ls())
+
+# Load data
+df = read.delim2("CRSP_TO.csv", sep = ",")
+```
+
+
+Add variables
+```{r}
+# Explode dates
+df$year = as.numeric(substr(df$date, start = 1, stop = 4))
+df$month = as.numeric(substr(df$date, start = 5, stop = 6))
+
+# Keep only year-end observations
+df = subset(df, month == 12)
+
+# Break down SIC codes
+df$sic4 = df$SICCD
+```
+
+Exclusions 1:
+```{r}
+# Select exchanges
+df = subset(df, EXCHCD %in% c(1,2,3)) # US exchanges
+
+# Remove unwanted types of shares
+df = subset(df, SHRCD %in% c(10, 11)) # only common stocks incorporated in the US
+```
+
+
+```{r}
+# Create annual values by firm
+to = df %>% group_by(year, PERMCO) %>% summarise(vol = sum(VOL, na.rm = T),
+                                               shout = sum(SHROUT, na.rm = T))
+# Add back sic
+sic = df %>% select(year, PERMCO, sic4)
+to = left_join(to, sic, by = c("year", "PERMCO"))
+to$id = paste(to$year, to$PERMCO)
+to = to[!duplicated(to$id),]
+
+# Break down sic codes
+to$sic3 = substr(to$sic4, start = 1, stop = 3)
+to$sic2 = substr(to$sic4, start = 1, stop = 2)
+to$sic1 = substr(to$sic4, start = 1, stop = 1)
+
+# Create turnover variable
+to$to = to$vol / to$shout
+
+# Aggregate by industry
+to4 = to %>% group_by(year, sic4) %>% summarise(vol = mean(to, na.rm = T))
+to3 = to %>% group_by(year, sic3) %>% summarise(vol = mean(to, na.rm = T))
+to2 = to %>% group_by(year, sic2) %>% summarise(vol = mean(to, na.rm = T))
+to1 = to %>% group_by(year, sic1) %>% summarise(vol = mean(to, na.rm = T))
+
+# Export
+write.csv(to, "Turnover.csv", row.names = F)
+```

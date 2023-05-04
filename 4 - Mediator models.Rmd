@@ -1,0 +1,251 @@
+---
+title: "4 - Mediator models"
+author: "Albert Planting-Gyllenbaga (41669)"
+date: "04/05/2021"
+output: html_document
+---
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(stringr)
+library(ggplot2)
+library(directlabels)
+library(purrr)
+library(fBasics)
+library(Hmisc)
+library(plm)
+library(stargazer)
+library(lmtest)
+library(sandwich)
+library(car)
+library(scales)
+library(DescTools)
+library(ggrepel)
+```
+
+
+Load and adjust data
+```{r}
+# Clear data
+rm(list=ls())
+
+# Load data
+df = read.delim2("dataset_interacted.csv", sep = ",")
+sync = read.delim2("nsynch.csv", sep = ",")
+
+# Adjust classes
+x = colnames(df)
+x = x[!(x %in% c("COMNAM"))]
+
+for (i in x) {
+  df[[i]] = as.numeric(as.character(df[[i]]))
+}
+
+x = c("year", "PERMCO", "GVKEY", "sic4", "sic3", "sic2", "sic1", "naics4")
+
+for (i in x) {
+  df[[i]] = factor(df[[i]])
+}
+
+# Adjust sync
+sync$nsynch = as.numeric(as.character(sync$nsynch))
+sync$year = factor(sync$year)
+sync$PERMCO = factor(sync$PERMCO)
+sync$id = paste(sync$year, sync$PERMCO)
+sync = sync[!duplicated(sync$id),]
+
+# Rename NEST and size
+colnames(df) = gsub("NEST", "nest", colnames(df))
+colnames(df) = gsub("S", "Sz", colnames(df))
+
+# Merge in sync
+df = left_join(df, sync[c("year", "PERMCO", "nsynch")], by = c("year", "PERMCO"))
+```
+
+
+Listing count relationship with liquidity and analyst coverage
+```{r}
+# Create containers
+mods_lcmeds = list()
+obs = as.data.frame(matrix(nrow = 2, ncol = 3))
+
+# Run models
+n = 1
+mod = lm(nest ~ lc3, data = df)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_lcmeds[[n]] = mod
+
+n = n + 1
+mod = lm(nest ~ lc3 + Sz + to + age + year, data = df)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_lcmeds[[n]] = mod
+
+n = n + 1
+mod = lm(to ~ lc3, data = df)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_lcmeds[[n]] = mod
+
+
+n = n + 1
+mod = lm(to ~ lc3 + Sz + nest + MB + indMB + year, data = df)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_lcmeds[[n]] = mod
+
+## Heteroscedasticity tests
+# bptest(mods_lcmeds[[2]], data = df)
+# bptest(mods_lcmeds[[4]], data = df)
+# 
+## Fixed effects tests
+# plmtest(plm(nest ~ lc3 + Sz, index = "year", model = "within", data = df),
+#         c("time"), type=c("bp"))
+# plmtest(plm(nest ~ lc3 + Sz + MB + indMB, index = "year", model = "within", data = df),
+#         c("time"), type=c("bp"))
+
+# Create table
+n = as.numeric(unlist(obs[1,]))
+r2 = as.numeric(unlist(obs[2,]))
+r2 = format(round(r2, digits=2), nsmall = 2) 
+
+stargazer(mods_lcmeds,
+          type="latex",
+          omit = c("19", "20"),
+          model.names = F,
+          dep.var.labels.include = T,
+          omit.stat=c("ser", "f", "adj.rsq"),
+          covariate.labels = c("$LC_{t}$", "$S_{t}$", "$TO_{t}$", "$Age_{t}$", 
+                              "$NEST_{t}$", "$M/B_{t}$", "$IndM/B_{t}$", "Constant"),
+          add.lines=list(c('Year fixed effects', c("No", "Yes", "No", "Yes")),
+                         c('Adjusted SE', c("Yes", "Yes", "Yes", "Yes")),
+                         c("Observations", n),
+                         c("Adjusted R2", r2)
+                           ))
+```
+
+
+Robustness tests: Analyst coverage
+```{r}
+# Create containers
+mods_rob = list()
+obs = as.data.frame(matrix(nrow = 2, ncol = 3))
+
+# Run models
+n = 1
+mod = lm(nest ~ lc3 + Sz + to + age + year, data = df)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_rob[[n]] = mod
+
+n = n + 1
+mod = lm(nest ~ lc3l + Sz + to + age + year, data = df)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_rob[[n]] = mod
+
+
+n = n + 1
+mod = lm(nest ~ lc4 + Sz + to + age + year, data = df)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic4"))
+mods_rob[[n]] = mod
+
+n = n + 1
+mod = lm(nest ~ lc_naics + Sz + to + age + year, data = df)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "naics4"))
+mods_rob[[n]] = mod
+
+
+# Create table
+n = as.numeric(unlist(obs[1,]))
+r2 = as.numeric(unlist(obs[2,]))
+r2 = format(round(r2, digits=2), nsmall = 2) 
+
+stargazer(mods_rob,
+          type="latex",
+          omit = c("19", "20"),
+          model.names = F,
+          dep.var.labels.include = T,
+          omit.stat=c("ser", "f", "adj.rsq"),
+          covariate.labels = c("$LC_{t}$", "$LC_{t-1}$", "4-digit SIC $LC_{t}$",
+                               "NAICS $LC_{t}$",
+                               "$S_{t}$", "$TO_{t}$", "$Age_{t}$", 
+                               "Constant"),
+          add.lines=list(c('Year fixed effects', c("Yes", "Yes", "Yes", "Yes")),
+                         c('Adjusted SE', c("Yes", "Yes", "Yes", "Yes")),
+                         c("Observations", n),
+                         c("Adjusted R2", r2)
+                           ))
+```
+
+
+Robustness tests: Liquidity
+```{r}
+# Create containers
+mods_rob = list()
+obs = as.data.frame(matrix(nrow = 2, ncol = 3))
+
+# Run models
+n = 1
+mod = lm(to ~ lc3 + Sz + nest + MB + indMB + year, data = df)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_rob[[n]] = mod
+
+n = n + 1
+mod = lm(to ~ lc3l + Sz + nest + MB + indMB + year, data = df)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic3"))
+mods_rob[[n]] = mod
+
+
+n = n + 1
+mod = lm(to ~ lc4 + Sz + nest + MB + indMB + year, data = df)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "sic4"))
+mods_rob[[n]] = mod
+
+n = n + 1
+mod = lm(to ~ lc_naics + Sz + nest + MB + indMB + year, data = df)
+obs[1, n] = nobs(mod)
+obs[2, n] = summary(mod)$r.squared
+mod = coeftest(mod, vcov = vcovHC(mod, type = "HC0", cluster = "naics4"))
+mods_rob[[n]] = mod
+
+
+# Create table
+n = as.numeric(unlist(obs[1,]))
+r2 = as.numeric(unlist(obs[2,]))
+r2 = format(round(r2, digits=2), nsmall = 2) 
+
+stargazer(mods_rob,
+          type="latex",
+          omit = c("19", "20"),
+          model.names = F,
+          dep.var.labels.include = T,
+          omit.stat=c("ser", "f", "adj.rsq"),
+          covariate.labels = c("$LC_{t}$", "$LC_{t-1}$", "4-digit SIC $LC_{t}$",
+                               "NAICS $LC_{t}$", "$S_{t}$", 
+                               "$NEST_{t}$", "$M/B_{t}$", "$IndM/B_{t}$", "Constant"),
+          add.lines=list(c('Year fixed effects', c("Yes", "Yes", "Yes", "Yes")),
+                         c('Adjusted SE', c("Yes", "Yes", "Yes", "Yes")),
+                         c("Observations", n),
+                         c("Adjusted R2", r2)
+                           ))
+```
