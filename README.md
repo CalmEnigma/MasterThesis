@@ -18,3 +18,5 @@ The scripts can be identified as follows:
 - Those with a prefix of 0 = extraction, cleaning and engineering of certain control variables from adjacent datasets
 - Prefixes of 1 & 2 = extraction, cleaning, and engineering of key stock and firm data from the CRSP and CCM databases
 - Prefices of 4 & 5 = inferential statistics performed on the clean data, and associated robustness tests
+
+The thesis text is included in the repository in PDF format.
