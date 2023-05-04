@@ -13,3 +13,8 @@ in the last two-and-a-half decades. Additionally, the persistently negative coef
 hint that investors may be employing intra-industry information improperly, especially
 in more recent times for firms with high market-to-book ratios.
 
+The scripts can be identified as follows:
+
+- Those with a prefix of 0 = extraction, cleaning and engineering of certain control variables from adjacent datasets
+- Prefixes of 1 & 2 = extraction, cleaning, and engineering of key stock and firm data from the CRSP and CCM databases
+- Prefices of 4 & 5 = inferential statistics performed on the clean data, and associated robustness tests
